@@ -151,18 +151,20 @@ class LoggingManager:
         action: float,
         reasoning: Optional[str] = None,
         metadata: Optional[Dict] = None,
-        api_metrics: Optional[Dict] = None
+        api_metrics: Optional[Dict] = None,
+        system_prompt: Optional[str] = None
     ):
         """Log an LLM generation as a separate trace.
 
         Args:
             player_id: Player identifier
-            prompt: Input prompt to LLM
+            prompt: User input prompt to LLM
             response: LLM response text
             action: Parsed extraction action
             reasoning: Extracted reasoning text
             metadata: Additional metadata
             api_metrics: API call metrics (latency, tokens, cost, etc.)
+            system_prompt: System prompt/instructions (optional)
         """
         if not self.client:
             raise RuntimeError("Langfuse client is not initialized. Cannot log generation.")
@@ -171,12 +173,27 @@ class LoggingManager:
             # Create a unique trace name for this player action
             trace_name = f"{self.game_id}_round_{self.current_round}_player_{player_id}"
 
+            # Format input as structured messages if system prompt is provided
+            # This allows Langfuse to properly display both system and user prompts
+            if self.config["log_llm_prompts"]:
+                if system_prompt:
+                    # Use structured message format for better display in Langfuse
+                    input_messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ]
+                else:
+                    # Fallback to plain string if no system prompt
+                    input_messages = prompt
+            else:
+                input_messages = "[prompt hidden]"
+
             # Use Langfuse 3.11.0 API: start_generation creates a generation
             # that automatically creates its own parent trace
             generation_params = {
                 "name": trace_name,
                 "model": self.config["llm_model"],
-                "input": prompt if self.config["log_llm_prompts"] else "[prompt hidden]",
+                "input": input_messages,
                 "output": response if self.config["log_llm_responses"] else "[response hidden]",
                 "metadata": {
                     "game_id": self.game_id,

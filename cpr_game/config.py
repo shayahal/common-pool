@@ -7,6 +7,7 @@ Modify these constants to customize game behavior.
 import os
 from typing import Dict, List
 from dotenv import load_dotenv
+from .persona_prompts import PERSONA_PROMPTS, GAME_RULES_PROMPT
 
 # Load environment variables from .env file
 load_dotenv()
@@ -61,45 +62,18 @@ LLM_TEMPERATURE: float = 0.7
 LLM_MAX_TOKENS: int = 500
 LLM_TIMEOUT: int = 30  # seconds
 
-# Persona System Prompts
-PERSONA_PROMPTS: Dict[str, str] = {
-    "rational_selfish": """You are a rational, self-interested player who aims to maximize your own payoff.
-You understand game theory and will extract resources strategically to maximize your individual gains.
-You may cooperate if it serves your long-term interests, but your primary goal is personal profit.""",
-
-    "cooperative": """You are a cooperative player who values group welfare and sustainability.
-You aim to maintain the resource for long-term benefit of all players.
-You prefer fair distribution and will try to establish trust and cooperation patterns.""",
-
-    "aggressive": """You are an aggressive player who prioritizes immediate gains.
-You tend to extract as much as possible each round, focusing on short-term profits.
-You are less concerned about long-term resource sustainability.""",
-
-    "conservative": """You are a conservative player who is risk-averse.
-You prefer to extract small amounts to ensure the resource remains available.
-You prioritize stability and avoiding resource depletion over maximizing gains.""",
-
-    "opportunistic": """You are an opportunistic player who adapts your strategy based on others' actions.
-You observe what other players do and adjust your extraction accordingly.
-You may cooperate when others cooperate, but exploit when others are aggressive.""",
-
-    "altruistic": """You are an altruistic player who prioritizes the welfare of others.
-You are willing to extract less to ensure others can benefit from the resource.
-You value fairness and equitable distribution above personal gain.""",
-
-    "null": "",  # Null persona with no characteristics
-
-    "": """You are a player in a resource management game.
-Make decisions that you think are best given the situation."""
-}
+# Persona System Prompts (imported from persona_prompts module)
+# PERSONA_PROMPTS is now defined in persona_prompts.py
 
 # Agent Personas (first N_PLAYERS will be used)
 PLAYER_PERSONAS: list[str] = list(PERSONA_PROMPTS.keys()) 
 
 # Prompt Engineering
-INCLUDE_HISTORY_ROUNDS: int = 5  # How many past rounds to include in context
+INCLUDE_HISTORY_ROUNDS: int = 3  # How many past rounds to include in context
 SHOW_OTHER_PLAYERS_ACTIONS: bool = True  # Full observability
 ALLOW_REASONING_OUTPUT: bool = True  # Let LLM explain its thinking
+COMPACT_PROMPTS: bool = True  # Use compact prompt format to reduce token usage
+USE_INCREMENTAL_PROMPTS: bool = False  # Use delta prompts (only send changes) - advanced optimization
 
 # ============================================================================
 # Langfuse Configuration
@@ -204,9 +178,12 @@ CONFIG: Dict = {
     "llm_timeout": LLM_TIMEOUT,
     "player_personas": PLAYER_PERSONAS,
     "persona_prompts": PERSONA_PROMPTS,
+    "game_rules_prompt": GAME_RULES_PROMPT,
     "include_history_rounds": INCLUDE_HISTORY_ROUNDS,
     "show_other_players_actions": SHOW_OTHER_PLAYERS_ACTIONS,
     "allow_reasoning_output": ALLOW_REASONING_OUTPUT,
+    "compact_prompts": COMPACT_PROMPTS,
+    "use_incremental_prompts": USE_INCREMENTAL_PROMPTS,
 
     # Langfuse (always required)
     "langfuse_public_key": LANGFUSE_PUBLIC_KEY,
@@ -238,6 +215,10 @@ CONFIG: Dict = {
     
     # Logging
     "log_dir": "logs",
+    
+    # Database
+    "db_path": "data/game_results.duckdb",
+    "db_enabled": True,
 }
 
 

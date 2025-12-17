@@ -13,6 +13,8 @@ import pandas as pd
 import hashlib
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Tuple, Optional, Dict
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -24,6 +26,7 @@ DEBUG_LOG_PATH = LOGS_DIR / "debug.log"
 
 from cpr_game.game_runner import GameRunner
 from cpr_game.config import CONFIG
+from cpr_game.db_manager import DatabaseManager
 import time
 
 
@@ -36,7 +39,9 @@ def _run_game_in_tab(config, use_mock_agents):
             use_mock_agents=use_mock_agents
         )
 
-        game_id = runner.setup_game()
+        # Get or generate experiment_id
+        experiment_id = config.get("experiment_id")
+        game_id = runner.setup_game(experiment_id=experiment_id)
     except ValueError as e:
         # Handle configuration errors
         error_msg = str(e)
@@ -50,6 +55,11 @@ def _run_game_in_tab(config, use_mock_agents):
 
     # Create unique run ID
     run_id = str(uuid.uuid4())[:8]
+    # Use experiment_id from runner if available, otherwise use run_id
+    if not hasattr(runner, 'experiment_id') or not runner.experiment_id:
+        experiment_id = run_id
+    else:
+        experiment_id = runner.experiment_id
     n_players = config["n_players"]
     max_steps = config["max_steps"]
 
@@ -89,34 +99,82 @@ def _run_game_in_tab(config, use_mock_agents):
             # Set current round for logging
             runner.logger.set_current_round(step)
 
-            # Get actions from all agents
+            # Get actions from all agents in parallel
             actions = []
-            reasonings = []
-
-            for i, agent in enumerate(runner.agents):
-                obs = observations[f"player_{i}"]
-                action, reasoning = agent.act(obs, return_reasoning=True)
+            reasonings = [None] * n_players
+            
+            # Helper function to run agent action
+            def run_agent_action(i: int, agent, obs: Dict) -> Tuple[int, int, str, Optional[Dict], str, Optional[str]]:
+                """Run agent action and return results."""
+                try:
+                    action, reasoning = agent.act(obs, return_reasoning=True)
+                    api_metrics = None
+                    if hasattr(agent, 'get_last_api_metrics'):
+                        api_metrics = agent.get_last_api_metrics()
+                    prompt = agent._build_prompt(obs) if hasattr(agent, '_build_prompt') else ""
+                    system_prompt = None
+                    if hasattr(agent, 'system_prompt'):
+                        system_prompt = agent.system_prompt
+                    return (i, action, reasoning, api_metrics, prompt, system_prompt)
+                except Exception as e:
+                    # Log error and return default action
+                    st.error(f"Error in agent {i}: {e}")
+                    return (i, config['min_extraction'], f"Error: {str(e)}", None, "", None)
+            
+            # Run all agents in parallel using ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=n_players) as executor:
+                # Submit all agent actions
+                future_to_player = {
+                    executor.submit(run_agent_action, i, agent, observations[f"player_{i}"]): i
+                    for i, agent in enumerate(runner.agents)
+                }
+                
+                # Collect results as they complete (maintain order by player_id)
+                results = {}
+                for future in as_completed(future_to_player):
+                    try:
+                        player_id, action, reasoning, api_metrics, prompt, system_prompt = future.result()
+                        results[player_id] = (action, reasoning, api_metrics, prompt, system_prompt)
+                    except Exception as e:
+                        player_id = future_to_player[future]
+                        st.error(f"Error getting result from agent {player_id}: {e}")
+                        results[player_id] = (
+                            config['min_extraction'],
+                            f"Error: {str(e)}",
+                            None,
+                            "",
+                            None
+                        )
+            
+            # Process results in order
+            for i in range(n_players):
+                if i not in results:
+                    # Fallback if result missing
+                    action = config['min_extraction']
+                    reasoning = "Error: No result from agent"
+                    api_metrics = None
+                    prompt = ""
+                    system_prompt = None
+                else:
+                    action, reasoning, api_metrics, prompt, system_prompt = results[i]
+                
                 actions.append(action)
-                reasonings.append(reasoning)
-
-                # Get API metrics if available
-                api_metrics = None
-                if hasattr(agent, 'get_last_api_metrics'):
-                    api_metrics = agent.get_last_api_metrics()
+                reasonings[i] = reasoning
 
                 # Log generation
-                prompt = agent._build_prompt(obs) if hasattr(agent, '_build_prompt') else ""
                 runner.logger.log_generation(
                     player_id=i,
                     prompt=prompt,
                     response=reasoning or "",
                     action=action,
                     reasoning=reasoning,
-                    api_metrics=api_metrics
+                    api_metrics=api_metrics,
+                    system_prompt=system_prompt
                 )
 
                 # Add to dashboard
                 if dashboard:
+                    obs = observations[f"player_{i}"]
                     game_state_context = {
                         "resource_level": obs.get("resource_level", [0])[0] if isinstance(obs.get("resource_level"), np.ndarray) else obs.get("resource_level", 0),
                         "step": obs.get("step", [0])[0] if isinstance(obs.get("step"), np.ndarray) else obs.get("step", step),
@@ -180,6 +238,43 @@ def _run_game_in_tab(config, use_mock_agents):
 
         # End logging trace
         runner.logger.end_game_trace(summary)
+
+        # Save results to database
+        if runner.db_manager and runner.db_manager.enabled:
+            try:
+                from datetime import datetime
+                timestamp = datetime.now().isoformat()
+                # Use experiment_id from runner if available
+                exp_id = runner.experiment_id if hasattr(runner, 'experiment_id') and runner.experiment_id else experiment_id
+                
+                runner.db_manager.save_game_results(
+                    game_id=game_id,
+                    agents=runner.agents,
+                    summary=summary,
+                    config=config,
+                    experiment_id=exp_id,
+                    timestamp=timestamp
+                )
+                # Verify save was successful
+                if runner.db_manager.verify_game_saved(game_id):
+                    saved_results = runner.db_manager.query_results(
+                        "SELECT COUNT(*) FROM game_results WHERE game_id = ?",
+                        [game_id]
+                    )
+                    if saved_results and len(saved_results) > 0:
+                        player_count = saved_results[0][0]
+                        st.success(f"✓ Game results saved to database ({player_count} players)")
+                else:
+                    st.warning("⚠ Game results may not have been saved correctly")
+            except Exception as e:
+                # Log error but don't fail the game
+                st.warning(f"⚠ Database save failed: {str(e)}")
+                import traceback
+                st.debug(traceback.format_exc())
+        elif not runner.db_manager:
+            st.info("ℹ Database manager not initialized")
+        elif not runner.db_manager.enabled:
+            st.info("ℹ Database saving is disabled")
 
         # Clear progress indicators
         progress_bar.empty()
@@ -320,7 +415,7 @@ def main():
         
         for i in range(n_players):
             # Find default persona for this player, or use first available
-            default_persona = default_personas[i] if i < len(default_personas) else persona_options[0]
+            default_persona = default_personas[i] if i < len(default_personas) else persona_options[0] if persona_options else "null"
             default_index = persona_options.index(default_persona) if default_persona in persona_options else 0
             
             persona = st.selectbox(
@@ -329,6 +424,9 @@ def main():
                 index=default_index,
                 key=f"persona_{i}"
             )
+            # Validate persona is not empty
+            if not persona or persona.strip() == "":
+                persona = persona_options[0] if persona_options else "null"
             personas.append(persona)
         
         # Run button
@@ -404,6 +502,19 @@ def main():
     
     # Run new game
     if run_game:
+        # Validate personas before creating config
+        persona_options = list(CONFIG["persona_prompts"].keys())
+        validated_personas = []
+        for i, persona in enumerate(personas):
+            # Ensure persona is valid and not empty
+            if not persona or persona.strip() == "" or persona not in persona_options:
+                # Use first available persona or "null" as fallback
+                fallback = persona_options[0] if persona_options else "null"
+                validated_personas.append(fallback)
+                st.warning(f"⚠️ Player {i} had invalid persona, using '{fallback}' instead.")
+            else:
+                validated_personas.append(persona)
+        
         # Create config and store it for execution
         config = CONFIG.copy()
         config["n_players"] = n_players
@@ -412,7 +523,7 @@ def main():
         config["regeneration_rate"] = regeneration_rate
         config["sustainability_threshold"] = sustainability_threshold
         config["max_fishes"] = max_fishes
-        config["player_personas"] = personas
+        config["player_personas"] = validated_personas
 
         # Store config and flags
         st.session_state.game_config_pending = {

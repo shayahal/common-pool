@@ -3,20 +3,24 @@
 Orchestrates environment, agents, logging, and visualization.
 """
 
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 import time
 import uuid
 import numpy as np
 import json
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .config import CONFIG, validate_config
 from .cpr_environment import CPREnvironment
 from .llm_agent import LLMAgent, MockLLMAgent
 from .logging_manager import LoggingManager
 from .dashboard import Dashboard
+from .db_manager import DatabaseManager
 from .utils import format_round_summary
-from .logger_setup import setup_logging
+from .logger_setup import setup_logging, get_logger
+
+logger = get_logger(__name__)
 
 
 class GameRunner:
@@ -49,23 +53,37 @@ class GameRunner:
         self.agents: List[Union[LLMAgent, MockLLMAgent]] = []
         self.logger: Optional[LoggingManager] = None
         self.dashboard: Optional[Dashboard] = None
+        self.db_manager: Optional[DatabaseManager] = None
 
         # Game state
         self.game_id: Optional[str] = None
+        self.experiment_id: Optional[str] = None
         self.current_observations: Optional[Dict] = None
         self.game_history: List[Dict] = []
 
-    def setup_game(self, game_id: Optional[str] = None) -> str:
+    def setup_game(
+        self, 
+        game_id: Optional[str] = None,
+        experiment_id: Optional[str] = None
+    ) -> str:
         """Setup environment, agents, and logging for a new game.
 
         Args:
             game_id: Unique identifier for this game (auto-generated if None)
+            experiment_id: Optional experiment identifier (auto-generated if None)
 
         Returns:
             str: Game ID
         """
         # Generate game ID
         self.game_id = game_id or f"game_{uuid.uuid4().hex[:8]}"
+        
+        # Generate experiment ID if not provided
+        if experiment_id is None:
+            # Use config experiment_id if available, otherwise generate one
+            self.experiment_id = self.config.get("experiment_id") or f"exp_{uuid.uuid4().hex[:8]}"
+        else:
+            self.experiment_id = experiment_id
 
         # Initialize environment
         print(f"Initializing CPR environment...")
@@ -76,7 +94,24 @@ class GameRunner:
         self.agents = []
 
         for i in range(self.config['n_players']):
+            # Get persona with validation
+            if i >= len(self.config['player_personas']):
+                raise ValueError(
+                    f"Not enough personas defined for {self.config['n_players']} players. "
+                    f"Need {self.config['n_players']} personas, but only {len(self.config['player_personas'])} provided."
+                )
+            
             persona = self.config['player_personas'][i]
+            
+            # Validate persona is not empty
+            if not persona or persona.strip() == "":
+                # Try to use a fallback
+                available_personas = list(self.config.get("persona_prompts", {}).keys())
+                if available_personas:
+                    persona = available_personas[0]
+                    print(f"  Warning: Player {i} had empty persona, using '{persona}' instead.")
+                else:
+                    raise ValueError(f"Player {i} has empty persona and no fallback personas available.")
 
             if self.use_mock_agents:
                 agent = MockLLMAgent(
@@ -109,6 +144,21 @@ class GameRunner:
 
         # Initialize dashboard (optional)
         self.dashboard = Dashboard(self.config)
+
+        # Initialize database manager
+        db_path = self.config.get("db_path", "data/game_results.duckdb")
+        db_enabled = self.config.get("db_enabled", True)
+        try:
+            self.db_manager = DatabaseManager(db_path=db_path, enabled=db_enabled)
+            if self.db_manager.enabled and self.db_manager.conn is not None:
+                logger.info(f"Database manager initialized: {db_path}")
+            elif not db_enabled:
+                logger.info("Database manager disabled by configuration")
+            else:
+                logger.warning("Database manager initialized but connection is None")
+        except Exception as e:
+            logger.error(f"Failed to initialize database manager: {e}", exc_info=True)
+            self.db_manager = None
 
         print(f"\n✓ Game setup complete: {self.game_id}\n")
 
@@ -149,34 +199,82 @@ class GameRunner:
             # Set current round for logging
             self.logger.set_current_round(step)
 
-            # Get actions from all agents
+            # Get actions from all agents in parallel
             actions = np.zeros(self.config['n_players'])
-            reasonings = []
-
-            for i, agent in enumerate(self.agents):
-                obs = observations[f"player_{i}"]
-                action, reasoning = agent.act(obs, return_reasoning=True)
+            reasonings = [None] * self.config['n_players']
+            
+            # Helper function to run agent action
+            def run_agent_action(i: int, agent, obs: Dict) -> Tuple[int, int, str, Optional[Dict], str, Optional[str]]:
+                """Run agent action and return results."""
+                try:
+                    action, reasoning = agent.act(obs, return_reasoning=True)
+                    api_metrics = None
+                    if hasattr(agent, 'get_last_api_metrics'):
+                        api_metrics = agent.get_last_api_metrics()
+                    prompt = agent._build_prompt(obs) if hasattr(agent, '_build_prompt') else ""
+                    system_prompt = None
+                    if hasattr(agent, 'system_prompt'):
+                        system_prompt = agent.system_prompt
+                    return (i, action, reasoning, api_metrics, prompt, system_prompt)
+                except Exception as e:
+                    # Log error and return default action
+                    logger.error(f"Error in agent {i}: {e}", exc_info=True)
+                    return (i, self.config['min_extraction'], f"Error: {str(e)}", None, "", None)
+            
+            # Run all agents in parallel using ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=self.config['n_players']) as executor:
+                # Submit all agent actions
+                future_to_player = {
+                    executor.submit(run_agent_action, i, agent, observations[f"player_{i}"]): i
+                    for i, agent in enumerate(self.agents)
+                }
+                
+                # Collect results as they complete (maintain order by player_id)
+                results = {}
+                for future in as_completed(future_to_player):
+                    try:
+                        player_id, action, reasoning, api_metrics, prompt, system_prompt = future.result()
+                        results[player_id] = (action, reasoning, api_metrics, prompt, system_prompt)
+                    except Exception as e:
+                        player_id = future_to_player[future]
+                        logger.error(f"Error getting result from agent {player_id}: {e}", exc_info=True)
+                        results[player_id] = (
+                            self.config['min_extraction'],
+                            f"Error: {str(e)}",
+                            None,
+                            "",
+                            None
+                        )
+            
+            # Process results in order
+            for i in range(self.config['n_players']):
+                if i not in results:
+                    # Fallback if result missing
+                    action = self.config['min_extraction']
+                    reasoning = "Error: No result from agent"
+                    api_metrics = None
+                    prompt = ""
+                    system_prompt = None
+                else:
+                    action, reasoning, api_metrics, prompt, system_prompt = results[i]
+                
                 actions[i] = action
-                reasonings.append(reasoning)
-
-                # Get API metrics if available (for LLM agents)
-                api_metrics = None
-                if hasattr(agent, 'get_last_api_metrics'):
-                    api_metrics = agent.get_last_api_metrics()
+                reasonings[i] = reasoning
 
                 # Log generation
-                prompt = agent._build_prompt(obs) if hasattr(agent, '_build_prompt') else ""
                 self.logger.log_generation(
                     player_id=i,
                     prompt=prompt,
                     response=reasoning or "",
                     action=action,
                     reasoning=reasoning,
-                    api_metrics=api_metrics
+                    api_metrics=api_metrics,
+                    system_prompt=system_prompt
                 )
 
                 # Add to dashboard with full context
                 if self.dashboard:
+                    obs = observations[f"player_{i}"]
                     # Prepare game state context from observation
                     game_state_context = {
                         "resource_level": obs.get("resource_level", [0])[0] if isinstance(obs.get("resource_level"), np.ndarray) else obs.get("resource_level", 0),
@@ -264,6 +362,32 @@ class GameRunner:
             "summary": summary,
             "config": self.config,
         })
+
+        # Save results to database
+        if self.db_manager and self.db_manager.enabled:
+            try:
+                from datetime import datetime
+                timestamp = datetime.now().isoformat()
+                
+                self.db_manager.save_game_results(
+                    game_id=self.game_id,
+                    agents=self.agents,
+                    summary=summary,
+                    config=self.config,
+                    experiment_id=self.experiment_id,
+                    timestamp=timestamp
+                )
+                # Verify the save
+                if self.db_manager.verify_game_saved(self.game_id):
+                    logger.info(f"✓ Game results saved and verified for game {self.game_id}")
+                else:
+                    logger.warning(f"Game results saved but verification failed for {self.game_id}")
+            except Exception as e:
+                logger.error(f"Failed to save game results to database: {e}", exc_info=True)
+        elif not self.db_manager:
+            logger.warning("Database manager not initialized - results not saved")
+        elif not self.db_manager.enabled:
+            logger.debug("Database saving is disabled")
 
         return summary
 
