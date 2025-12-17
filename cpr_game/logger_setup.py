@@ -5,7 +5,9 @@ Provides a centralized logger configuration.
 
 import logging
 import sys
+import json
 from pathlib import Path
+from datetime import datetime
 
 
 def setup_logging(log_dir: str = "logs") -> None:
@@ -41,6 +43,45 @@ def setup_logging(log_dir: str = "logs") -> None:
     )
     stdout_handler.setFormatter(stdout_formatter)
     root_logger.addHandler(stdout_handler)
+
+
+class JSONFileHandler(logging.Handler):
+    """Custom handler for structured JSON logging of API calls."""
+    
+    def __init__(self, filename: str):
+        """Initialize JSON file handler.
+        
+        Args:
+            filename: Path to JSON log file
+        """
+        super().__init__()
+        self.filename = Path(filename)
+        self.filename.parent.mkdir(parents=True, exist_ok=True)
+    
+    def emit(self, record: logging.LogRecord):
+        """Emit a log record as JSON.
+        
+        Args:
+            record: Log record to emit
+        """
+        try:
+            log_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "level": record.levelname,
+                "logger": record.name,
+                "message": record.getMessage(),
+            }
+            
+            # Add exception info if present
+            if record.exc_info:
+                log_entry["exception"] = self.format(record)
+            
+            # Write as JSON line
+            with open(self.filename, "a") as f:
+                json.dump(log_entry, f)
+                f.write("\n")
+        except Exception:
+            self.handleError(record)
 
 
 def get_logger(name: str) -> logging.Logger:

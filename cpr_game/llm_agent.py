@@ -5,12 +5,17 @@ game state, history, and persona-based reasoning.
 """
 
 from typing import Dict, List, Optional, Tuple
+import time
 import numpy as np
 from openai import OpenAI
 from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError, AuthenticationError
 
 from .config import CONFIG
 from .utils import parse_extraction_from_text, validate_action
+from .logger_setup import get_logger
+from .api_logger import APILogger
+
+logger = get_logger(__name__)
 
 
 class LLMAgent:
@@ -66,11 +71,18 @@ class LLMAgent:
             )
         self.client = OpenAI(api_key=api_key)
 
+        # Initialize API logger
+        log_dir = self.config.get("log_dir", "logs")
+        self.api_logger = APILogger(log_dir=log_dir)
+
         # Memory
         self.observation_history: List[Dict] = []
         self.action_history: List[int] = []
         self.reward_history: List[float] = []
         self.reasoning_history: List[str] = []
+        
+        # API call metrics storage
+        self.last_api_metrics: Optional[Dict] = None
 
     def act(
         self,
@@ -90,8 +102,21 @@ class LLMAgent:
         # Build prompt
         prompt = self._build_prompt(observation)
 
-        # Get LLM response
+        # Get LLM response with timing and logging
+        start_time = time.time()
+        response_text = None
+        api_metrics = {
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+            "latency": None,
+            "success": False,
+            "error": None,
+        }
+        
         try:
+            logger.debug(f"Player {self.player_id}: Making API call to {self.llm_model}")
+            
             response = self.client.chat.completions.create(
                 model=self.llm_model,
                 messages=[
@@ -103,21 +128,131 @@ class LLMAgent:
                 timeout=self.timeout
             )
 
+            # Extract response and token usage
             response_text = response.choices[0].message.content
+            
+            # Extract token usage if available
+            if hasattr(response, 'usage') and response.usage:
+                api_metrics["prompt_tokens"] = response.usage.prompt_tokens
+                api_metrics["completion_tokens"] = response.usage.completion_tokens
+                api_metrics["total_tokens"] = response.usage.total_tokens
+            
+            api_metrics["success"] = True
+            api_metrics["latency"] = time.time() - start_time
+            
+            # Log successful API call
+            self.api_logger.log_api_call(
+                player_id=self.player_id,
+                model=self.llm_model,
+                prompt=prompt,
+                response=response_text,
+                prompt_tokens=api_metrics["prompt_tokens"],
+                completion_tokens=api_metrics["completion_tokens"],
+                total_tokens=api_metrics["total_tokens"],
+                latency=api_metrics["latency"],
+                success=True,
+                metadata={
+                    "temperature": self.temperature,
+                    "max_tokens": self.max_tokens,
+                    "persona": self.persona,
+                }
+            )
+            
+            logger.info(
+                f"Player {self.player_id}: API call successful | "
+                f"Tokens: {api_metrics['total_tokens']} | "
+                f"Latency: {api_metrics['latency']:.2f}s"
+            )
 
         except (APIError, APIConnectionError, RateLimitError, APITimeoutError, AuthenticationError) as e:
-            print(f"Error calling LLM API: {type(e).__name__}: {e}")
+            api_metrics["latency"] = time.time() - start_time
+            api_metrics["error"] = f"{type(e).__name__}: {str(e)}"
+            
+            logger.error(
+                f"Player {self.player_id}: API error - {type(e).__name__}: {e}",
+                exc_info=True
+            )
+            
+            # Log failed API call
+            self.api_logger.log_api_call(
+                player_id=self.player_id,
+                model=self.llm_model,
+                prompt=prompt,
+                response=None,
+                latency=api_metrics["latency"],
+                success=False,
+                error=api_metrics["error"],
+                metadata={
+                    "temperature": self.temperature,
+                    "max_tokens": self.max_tokens,
+                    "persona": self.persona,
+                    "error_type": type(e).__name__,
+                }
+            )
+            
             # Fallback to random action (integer)
             response_text = f"EXTRACT: {int(np.random.uniform(self.min_extraction, self.max_extraction))}"
+            
         except (AttributeError, IndexError, KeyError) as e:
-            print(f"Error parsing LLM response: {type(e).__name__}: {e}")
+            api_metrics["latency"] = time.time() - start_time
+            api_metrics["error"] = f"{type(e).__name__}: {str(e)}"
+            
+            logger.error(
+                f"Player {self.player_id}: Error parsing LLM response - {type(e).__name__}: {e}",
+                exc_info=True
+            )
+            
+            # Log parsing error
+            self.api_logger.log_api_call(
+                player_id=self.player_id,
+                model=self.llm_model,
+                prompt=prompt,
+                response=None,
+                latency=api_metrics["latency"],
+                success=False,
+                error=api_metrics["error"],
+                metadata={
+                    "temperature": self.temperature,
+                    "max_tokens": self.max_tokens,
+                    "persona": self.persona,
+                    "error_type": "parsing_error",
+                }
+            )
+            
             # Fallback to random action (integer)
             response_text = f"EXTRACT: {int(np.random.uniform(self.min_extraction, self.max_extraction))}"
+            
         except Exception as e:
-            # Catch any other unexpected exceptions
-            print(f"Unexpected error calling LLM: {type(e).__name__}: {e}")
+            api_metrics["latency"] = time.time() - start_time
+            api_metrics["error"] = f"{type(e).__name__}: {str(e)}"
+            
+            logger.error(
+                f"Player {self.player_id}: Unexpected error calling LLM - {type(e).__name__}: {e}",
+                exc_info=True
+            )
+            
+            # Log unexpected error
+            self.api_logger.log_api_call(
+                player_id=self.player_id,
+                model=self.llm_model,
+                prompt=prompt,
+                response=None,
+                latency=api_metrics["latency"],
+                success=False,
+                error=api_metrics["error"],
+                metadata={
+                    "temperature": self.temperature,
+                    "max_tokens": self.max_tokens,
+                    "persona": self.persona,
+                    "error_type": "unexpected_error",
+                }
+            )
+            
             # Fallback to random action (integer)
             response_text = f"EXTRACT: {int(np.random.uniform(self.min_extraction, self.max_extraction))}"
+        
+        # Store API metrics for retrieval
+        self.last_api_metrics = api_metrics
 
         # Parse action from response
         action, reasoning = parse_extraction_from_text(
@@ -157,6 +292,20 @@ class LLMAgent:
 
         prompt = f"""=== Common Pool Resource Game - Round {step + 1} ===
 
+We are playing a game of Common Pool Resource. 
+
+The rules of the game are as follows:
+- Your goal is to extract as much resource as possible throgout the whole game.  
+- There are {CONFIG["n_players"]} players in the game.
+- Each round, each player extract 0-{CONFIG["max_extraction"]} units
+- The resource level is regenerated by {CONFIG["regeneration_rate"]} units per round
+- The game ends when the resource level is {CONFIG["min_resource"]} or the maximum number of rounds is reached. 
+- If the resource level is {CONFIG["min_resource"]}, you will not earn any reward anymore.
+- You are player {self.player_id}.
+- The number of rounds is unknown to you. 
+- You have a history of your own actions and rewards, and the history of other players' actions and rewards.
+- Please think step by step and reason about your action and the chosen amount.
+
 Resource Status:
 - Current resource level: {resource:.2f}
 
@@ -171,8 +320,7 @@ Resource Status:
                 round_num = len(self.action_history) + idx
                 extraction = self.action_history[idx]
                 # Check if reward_history has enough elements for this negative index
-                reward = self.reward_history[idx] if abs(idx) <= len(self.reward_history) else 0.0
-                prompt += f"- Round {round_num}: Extracted {extraction}, Earned {reward:.2f}\n"
+                prompt += f"- Round {round_num}: Extracted {extraction}\n"
             prompt += "\n"
 
         # Add other players' history if enabled
@@ -249,12 +397,21 @@ Your response:"""
             return self.reasoning_history[-1]
         return None
 
+    def get_last_api_metrics(self) -> Optional[Dict]:
+        """Get metrics from the last API call.
+        
+        Returns:
+            Dictionary with API call metrics or None
+        """
+        return self.last_api_metrics
+
     def reset(self):
         """Reset agent's memory for new episode."""
         self.observation_history = []
         self.action_history = []
         self.reward_history = []
         self.reasoning_history = []
+        self.last_api_metrics = None
 
     def __repr__(self) -> str:
         """String representation of agent."""
@@ -289,6 +446,9 @@ class MockLLMAgent(LLMAgent):
         self.action_history: List[int] = []
         self.reward_history: List[float] = []
         self.reasoning_history: List[str] = []
+        
+        # API call metrics storage (None for mock agents since no API calls are made)
+        self.last_api_metrics: Optional[Dict] = None
 
     def act(
         self,
@@ -352,3 +512,4 @@ class MockLLMAgent(LLMAgent):
         self.action_history = []
         self.reward_history = []
         self.reasoning_history = []
+        self.last_api_metrics = None

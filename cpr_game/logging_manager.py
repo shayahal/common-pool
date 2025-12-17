@@ -135,6 +135,10 @@ class LoggingManager:
         self.generation_data: List[Dict] = []
         self.api_metrics_data: List[Dict] = []
 
+        # LLM communication tracking for trace input/output
+        self.all_prompts: List[Dict] = []  # Track all prompts sent to LLM
+        self.all_responses: List[Dict] = []  # Track all responses from LLM
+
     def start_game_trace(self, game_id: str, config: Dict) -> Any:
         """Initialize top-level trace for a game.
 
@@ -158,8 +162,21 @@ class LoggingManager:
 
             # Langfuse 3.x API: Use start_span to create a span that we can manage manually
             # The trace is created automatically when the first span is created
+
+            # Prepare input data for the trace
+            trace_input = {
+                "n_players": config["n_players"],
+                "max_steps": config["max_steps"],
+                "personas": config["player_personas"][:config["n_players"]],
+                "llm_model": config["llm_model"],
+                "initial_resource": config["initial_resource"],
+                "regeneration_rate": config["regeneration_rate"],
+                "max_extraction": config["max_extraction"],
+            }
+
             trace_span = self.client.start_span(
                 name=f"CPR_Game_{game_id}",
+                input=trace_input,
                 metadata={
                     "game_id": game_id,
                     "timestamp": datetime.now().isoformat(),
@@ -413,7 +430,7 @@ class LoggingManager:
                 "reasoning": reasoning,
                 "api_metrics": api_metrics,
             })
-            
+
             # Store API metrics separately for easy access
             if api_metrics:
                 api_record = {
@@ -422,6 +439,20 @@ class LoggingManager:
                     **api_metrics
                 }
                 self.api_metrics_data.append(api_record)
+
+            # Track prompts and responses for trace input/output aggregation
+            self.all_prompts.append({
+                "player_id": player_id,
+                "round": len(self.all_prompts) // self.config.get("n_players", 1),
+                "prompt": prompt if self.config["log_llm_prompts"] else "[prompt hidden]",
+            })
+            self.all_responses.append({
+                "player_id": player_id,
+                "round": len(self.all_responses) // self.config.get("n_players", 1),
+                "response": response if self.config["log_llm_responses"] else "[response hidden]",
+                "action": action,
+                "reasoning": reasoning,
+            })
 
         except (AttributeError, ValueError, ConnectionError) as e:
             logger.error(f"Error logging generation: {e}", exc_info=True)
@@ -520,20 +551,55 @@ class LoggingManager:
             raise RuntimeError("Game trace is not started. Call start_game_trace() first.")
 
         try:
-            # Update the game span metadata before ending
+            # Update the game span with input/output and metadata before ending
             if self.current_game_span and hasattr(self.current_game_span, 'update'):
-                logger.info("Updating game span with summary...")
+                logger.info("Updating game span with LLM communication and summary...")
                 try:
+                    # Prepare enhanced input with all LLM prompts
+                    trace_input = {
+                        "game_config": {
+                            "n_players": self.config["n_players"],
+                            "max_steps": self.config["max_steps"],
+                            "personas": self.config["player_personas"][:self.config["n_players"]],
+                            "llm_model": self.config["llm_model"],
+                            "initial_resource": self.config["initial_resource"],
+                            "regeneration_rate": self.config["regeneration_rate"],
+                            "max_extraction": self.config["max_extraction"],
+                        },
+                        "llm_prompts": self.all_prompts,  # All prompts sent to LLM
+                        "total_prompts": len(self.all_prompts),
+                    }
+
+                    # Prepare enhanced output with all LLM responses
+                    trace_output = {
+                        "game_summary": {
+                            "total_rounds": summary.get("total_rounds", 0),
+                            "final_resource_level": summary.get("final_resource_level", 0),
+                            "tragedy_occurred": summary.get("tragedy_occurred", False),
+                            "avg_cooperation_index": summary.get("avg_cooperation_index", 0),
+                            "gini_coefficient": summary.get("gini_coefficient", 0),
+                            "sustainability_score": summary.get("sustainability_score", 0),
+                            "avg_payoff_per_player": summary.get("avg_payoff_per_player", 0),
+                            "final_resource": summary.get("final_resource", 0),
+                        },
+                        "llm_responses": self.all_responses,  # All responses from LLM
+                        "total_responses": len(self.all_responses),
+                    }
+
                     self.current_game_span.update(
+                        input=trace_input,
+                        output=trace_output,
                         metadata={
                             "game_id": self.game_id,
                             "timestamp": datetime.now().isoformat(),
                             "summary": summary,
                             "end_time": datetime.now().isoformat(),
+                            "total_llm_calls": len(self.all_prompts),
                         }
                     )
+                    logger.info(f"✓ Updated trace with {len(self.all_prompts)} prompts and {len(self.all_responses)} responses")
                 except Exception as update_error:
-                    logger.warning(f"Could not update span metadata: {update_error}")
+                    logger.warning(f"Could not update span with LLM communication: {update_error}")
 
             # End the game span if it exists
             if self.current_game_span and hasattr(self.current_game_span, 'end'):
@@ -621,6 +687,8 @@ class LoggingManager:
         self.round_metrics = []
         self.generation_data = []
         self.api_metrics_data = []
+        self.all_prompts = []
+        self.all_responses = []
 
     def __del__(self):
         """Cleanup: flush any pending traces."""
@@ -654,6 +722,10 @@ class MockLoggingManager(LoggingManager):
         self.generation_data = []
         self.api_metrics_data = []
         self.game_id = None
+
+        # LLM communication tracking
+        self.all_prompts = []
+        self.all_responses = []
 
     def start_game_trace(self, game_id: str, config: Dict) -> Dict:
         """Start mock game trace."""
@@ -703,7 +775,7 @@ class MockLoggingManager(LoggingManager):
             self.current_trace_data["generations"].append(gen)
 
         self.generation_data.append(gen)
-        
+
         # Store API metrics separately
         if api_metrics:
             api_record = {
@@ -714,6 +786,20 @@ class MockLoggingManager(LoggingManager):
             if not hasattr(self, 'api_metrics_data'):
                 self.api_metrics_data = []
             self.api_metrics_data.append(api_record)
+
+        # Track prompts and responses for trace input/output aggregation
+        self.all_prompts.append({
+            "player_id": player_id,
+            "round": len(self.all_prompts) // self.config.get("n_players", 1),
+            "prompt": prompt,
+        })
+        self.all_responses.append({
+            "player_id": player_id,
+            "round": len(self.all_responses) // self.config.get("n_players", 1),
+            "response": response,
+            "action": action,
+            "reasoning": reasoning,
+        })
 
     def log_round_metrics(self, round_num: int, metrics: Dict):
         """Log mock round metrics."""
@@ -745,3 +831,5 @@ class MockLoggingManager(LoggingManager):
         self.round_metrics = []
         self.generation_data = []
         self.api_metrics_data = []
+        self.all_prompts = []
+        self.all_responses = []

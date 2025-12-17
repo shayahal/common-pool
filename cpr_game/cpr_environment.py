@@ -224,22 +224,17 @@ class CPREnvironment(gym.Env):
 
         Reward function:
             reward_i = extraction_i (value per unit is 1)
-            + sustainability_bonus if resource_after >= sustainability_threshold
 
         Args:
             actions: Array of player extractions
-            resource_before_step: Resource level before this step (for bonus calculation)
+            resource_before_step: Resource level before this step (unused, kept for compatibility)
 
         Returns:
             Array of rewards (one per player)
         """
         # Base reward: extraction amount (value is 1 per unit)
-        # Convert to float to allow adding float bonuses
+        # Convert to float then back to int to ensure proper type handling
         rewards = actions.astype(float).copy()
-
-        # Sustainability bonus (based on resource AFTER step)
-        if self.current_resource >= self.sustainability_threshold:
-            rewards += self.sustainability_bonus
 
         # Convert rewards to int (round down any fractional parts)
         return np.floor(rewards).astype(int)

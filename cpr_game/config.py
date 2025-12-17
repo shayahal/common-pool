@@ -235,6 +235,9 @@ CONFIG: Dict = {
 
     # API keys
     "openai_api_key": OPENAI_API_KEY,
+    
+    # Logging
+    "log_dir": "logs",
 }
 
 

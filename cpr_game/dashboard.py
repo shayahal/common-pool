@@ -52,7 +52,9 @@ class Dashboard:
         self.extraction_history: List[np.ndarray] = []
         self.payoff_history: List[np.ndarray] = []
         self.cooperation_history: List[float] = []
-        self.reasoning_log: Dict[int, List[str]] = {}
+        # reasoning_log now stores dictionaries with: round, prompt, reasoning, action, game_state
+        self.reasoning_log: Dict[int, List[Dict]] = {}
+        self.api_metrics_data: List[Dict] = []
         
         # Detailed run history for each step - use session state to persist across reruns
         # Initialize session state if it doesn't exist
@@ -198,10 +200,17 @@ class Dashboard:
                 cooperation = self.cooperation_history[round_num] if round_num < len(self.cooperation_history) else 0.0
                 
                 # Get reasoning for this round if available
+                # Store full reasoning entry (dict) if available, for backward compatibility handle strings
                 round_reasoning = {}
                 for player_id in self.reasoning_log:
                     if len(self.reasoning_log[player_id]) > round_num:
-                        round_reasoning[player_id] = self.reasoning_log[player_id][round_num]
+                        entry = self.reasoning_log[player_id][round_num]
+                        # Handle both old format (string) and new format (dict)
+                        if isinstance(entry, dict):
+                            round_reasoning[player_id] = entry
+                        else:
+                            # Old format: just store as reasoning string
+                            round_reasoning[player_id] = {"reasoning": entry}
                 
                 round_data = {
                     "round": round_num + 1,  # 1-indexed for display
@@ -274,10 +283,18 @@ class Dashboard:
                         step=current_step
                     )
 
+        # Show reasoning table tab during game (if reasoning data is available)
+        if len(self.reasoning_log) > 0 and any(len(self.reasoning_log[i]) > 0 for i in self.reasoning_log):
+            st.divider()
+            self._render_reasoning_table()
+
         # Only show summary and tabs when game is done
         if game_state.get("done", False):
             # Create tabs for different views
-            tab1, tab2 = st.tabs(["📊 Charts & Metrics", "💭 Reasoning Log"])
+            tab_names = ["📊 Charts & Metrics", "💭 Reasoning Log"]
+            if self.api_metrics_data:
+                tab_names.append("📡 API Logs")
+            tab1, tab2, *rest_tabs = st.tabs(tab_names)
 
             with tab1:
                 # Summary
@@ -290,6 +307,11 @@ class Dashboard:
                     self._render_reasoning_log()
                 else:
                     st.info("Reasoning log is disabled in configuration.")
+
+            # API Logs tab (if available)
+            if self.api_metrics_data and len(rest_tabs) > 0:
+                with rest_tabs[0]:
+                    self._render_api_logs()
 
     def _render_header(self, game_state: Dict):
         """Render header with key metrics.
@@ -569,8 +591,123 @@ class Dashboard:
         else:
             st.plotly_chart(fig, width='stretch', key=chart_key)
 
+    def _render_reasoning_table(self):
+        """Render reasoning data in a table format showing round, resources, and each player's reasoning and action."""
+        st.markdown("### 📝 Reasoning Table")
+
+        if not self.reasoning_log or all(len(reasons) == 0 for reasons in self.reasoning_log.values()):
+            st.info("No reasoning data available yet...")
+            return
+
+        # Build table data
+        table_rows = []
+        n_players = len(self.reasoning_log)
+
+        # Find the maximum number of rounds across all players
+        max_rounds = max(len(self.reasoning_log[i]) for i in range(n_players)) if n_players > 0 else 0
+
+        if max_rounds == 0:
+            st.info("No reasoning data available yet...")
+            return
+
+        # Iterate through each round
+        for round_idx in range(max_rounds):
+            row = {}
+
+            # Get round number from first player's data if available
+            round_num = round_idx + 1
+            if 0 in self.reasoning_log and round_idx < len(self.reasoning_log[0]):
+                entry = self.reasoning_log[0][round_idx]
+                if isinstance(entry, dict):
+                    round_num = entry.get("round", round_idx + 1)
+
+            row["Round"] = round_num
+
+            # Get resource level from game state (use first player's data)
+            resource_level = "N/A"
+            if 0 in self.reasoning_log and round_idx < len(self.reasoning_log[0]):
+                entry = self.reasoning_log[0][round_idx]
+                if isinstance(entry, dict) and "game_state" in entry:
+                    game_state = entry["game_state"]
+                    if "resource_level" in game_state:
+                        resource_level = int(game_state["resource_level"])
+
+            row["Resources"] = resource_level
+
+            # Add reasoning and action for each player
+            for player_id in range(n_players):
+                reasoning = ""
+                action = "N/A"
+
+                if player_id in self.reasoning_log and round_idx < len(self.reasoning_log[player_id]):
+                    entry = self.reasoning_log[player_id][round_idx]
+
+                    if isinstance(entry, dict):
+                        reasoning = entry.get("reasoning", "")
+                        if entry.get("action") is not None:
+                            action = int(entry["action"])
+                    elif isinstance(entry, str):
+                        reasoning = entry
+
+                # Truncate reasoning for table display (show first 100 chars)
+                if len(reasoning) > 100:
+                    reasoning = reasoning[:100] + "..."
+
+                row[f"Reasoning P{player_id}"] = reasoning
+                row[f"Action P{player_id}"] = action
+
+            table_rows.append(row)
+
+        # Create DataFrame
+        df = pd.DataFrame(table_rows)
+
+        # Display with scrolling
+        st.dataframe(
+            df,
+            use_container_width=True,
+            height=min(600, 50 + len(df) * 35),
+            hide_index=True
+        )
+
+        # Add expandable details for full reasoning
+        st.markdown("#### Full Reasoning Details")
+        st.markdown("Click on a round below to see the complete reasoning for all players.")
+
+        for round_idx in range(max_rounds):
+            # Get round number
+            round_num = round_idx + 1
+            if 0 in self.reasoning_log and round_idx < len(self.reasoning_log[0]):
+                entry = self.reasoning_log[0][round_idx]
+                if isinstance(entry, dict):
+                    round_num = entry.get("round", round_idx + 1)
+
+            with st.expander(f"Round {round_num} - Full Details", expanded=False):
+                player_cols = st.columns(n_players)
+
+                for player_id in range(n_players):
+                    with player_cols[player_id]:
+                        st.markdown(f"**Player {player_id}**")
+
+                        if player_id in self.reasoning_log and round_idx < len(self.reasoning_log[player_id]):
+                            entry = self.reasoning_log[player_id][round_idx]
+
+                            if isinstance(entry, dict):
+                                reasoning = entry.get("reasoning", "")
+                                action = entry.get("action")
+
+                                st.markdown("**Reasoning:**")
+                                st.markdown(reasoning if reasoning else "_No reasoning provided_")
+
+                                if action is not None:
+                                    st.metric("Action", int(action))
+                            elif isinstance(entry, str):
+                                st.markdown("**Reasoning:**")
+                                st.markdown(entry)
+                        else:
+                            st.info("No data for this player")
+
     def _render_reasoning_log(self):
-        """Render LLM reasoning log."""
+        """Render LLM reasoning log with prompts, reasoning, and actions."""
         st.markdown("### 💭 LLM Reasoning Log")
 
         if not self.reasoning_log or all(len(reasons) == 0 for reasons in self.reasoning_log.values()):
@@ -586,21 +723,288 @@ class Dashboard:
                 if len(self.reasoning_log[i]) == 0:
                     st.info(f"No reasoning from Player {i} yet...")
                 else:
-                    # Show last few reasoning entries
-                    for round_num, reasoning in enumerate(self.reasoning_log[i][-10:]):
-                        with st.expander(f"Round {len(self.reasoning_log[i]) - 10 + round_num}", expanded=(round_num == len(self.reasoning_log[i][-10:]) - 1)):
-                            st.write(reasoning)
+                    # Show last few reasoning entries (most recent first)
+                    recent_entries = self.reasoning_log[i][-10:]
+                    recent_entries.reverse()  # Most recent first
 
-    def add_reasoning(self, player_id: int, reasoning: str):
+                    for idx, entry in enumerate(recent_entries):
+                        # Handle both old format (string) and new format (dict)
+                        if isinstance(entry, str):
+                            # Backward compatibility: old format (string)
+                            round_num = len(self.reasoning_log[i]) - 10 + idx + 1
+                            with st.expander(f"Round {round_num}", expanded=(idx == 0)):
+                                st.markdown("**💭 Reasoning:**")
+                                st.markdown(entry)
+                        else:
+                            # New format: dictionary
+                            round_num = entry.get("round", len(self.reasoning_log[i]) - 10 + idx + 1)
+                            reasoning = entry.get("reasoning", "")
+                            prompt = entry.get("prompt")
+                            action = entry.get("action")
+                            game_state = entry.get("game_state")
+
+                            # Create expandable section with round info
+                            round_title = f"Round {round_num}"
+                            if action is not None:
+                                round_title += f" - Action: {int(action)}"
+
+                            with st.expander(round_title, expanded=(idx == 0)):
+                                # Display prompt if available
+                                if prompt:
+                                    st.markdown("#### 📝 Prompt")
+                                    st.code(prompt, language="text")
+                                    st.divider()
+
+                                # Display reasoning with markdown (always show section, even if empty)
+                                st.markdown("#### 💭 Reasoning")
+                                if reasoning:
+                                    st.markdown(reasoning)
+                                else:
+                                    st.info("No reasoning provided.")
+
+                                # Display action and resource level if available
+                                if action is not None or (game_state and "resource_level" in game_state):
+                                    st.divider()
+                                    cols = []
+                                    if action is not None:
+                                        cols.append(("Action Taken", f"{int(action)}"))
+                                    if game_state and "resource_level" in game_state:
+                                        cols.append(("Resource Level", f"{int(game_state['resource_level'])}"))
+
+                                    if len(cols) == 1:
+                                        st.metric(cols[0][0], cols[0][1])
+                                    elif len(cols) == 2:
+                                        col1, col2 = st.columns(2)
+                                        with col1:
+                                            st.metric(cols[0][0], cols[0][1])
+                                        with col2:
+                                            st.metric(cols[1][0], cols[1][1])
+
+                                # Display game state context if available
+                                if game_state:
+                                    st.divider()
+                                    with st.expander("📊 Game State Context", expanded=False):
+                                        self._format_game_state(game_state)
+
+    def add_reasoning(
+        self,
+        player_id: int,
+        reasoning: str,
+        prompt: Optional[str] = None,
+        action: Optional[float] = None,
+        game_state: Optional[Dict] = None,
+        round_num: Optional[int] = None
+    ):
         """Add reasoning text for a player.
 
         Args:
             player_id: Player identifier
             reasoning: Reasoning text from LLM
+            prompt: Optional prompt sent to LLM
+            action: Optional action taken by player
+            game_state: Optional game state context
+            round_num: Optional round number (auto-incremented if not provided)
         """
         if player_id not in self.reasoning_log:
             self.reasoning_log[player_id] = []
-        self.reasoning_log[player_id].append(reasoning)
+        
+        # Auto-increment round number if not provided
+        if round_num is None:
+            round_num = len(self.reasoning_log[player_id]) + 1
+        
+        # Store as dictionary for structured data, with backward compatibility
+        # If only reasoning is provided, store as dict with reasoning only
+        # Otherwise, store full context
+        reasoning_entry = {
+            "round": round_num,
+            "reasoning": reasoning or "",
+        }
+        
+        if prompt is not None:
+            reasoning_entry["prompt"] = prompt
+        if action is not None:
+            reasoning_entry["action"] = action
+        if game_state is not None:
+            reasoning_entry["game_state"] = game_state
+        
+        self.reasoning_log[player_id].append(reasoning_entry)
+    
+    def _format_prompt(self, prompt: str) -> str:
+        """Format prompt for display.
+        
+        Args:
+            prompt: Raw prompt text
+            
+        Returns:
+            Formatted prompt string
+        """
+        # Return as-is for now, can be enhanced with syntax highlighting
+        return prompt
+    
+    def _format_reasoning(self, reasoning: str) -> str:
+        """Format reasoning text with markdown.
+        
+        Args:
+            reasoning: Raw reasoning text
+            
+        Returns:
+            Formatted reasoning string
+        """
+        # Return as-is, markdown will be rendered by st.markdown()
+        return reasoning
+    
+    def _format_game_state(self, game_state: Dict):
+        """Format and display game state context in a readable format.
+        
+        Args:
+            game_state: Dictionary containing game state information
+        """
+        if not game_state:
+            st.info("No game state information available.")
+            return
+        
+        # Display key metrics in columns
+        if "resource_level" in game_state:
+            st.metric("Resource Level", f"{int(game_state['resource_level'])}")
+        
+        if "step" in game_state:
+            st.metric("Step", f"{int(game_state['step'])}")
+        
+        # Display other relevant information
+        other_info = {}
+        for key in ["total_extraction", "cooperation_index", "my_cumulative_payoff", "other_players_cumulative_payoffs"]:
+            if key in game_state:
+                other_info[key] = game_state[key]
+        
+        if other_info:
+            st.markdown("**Additional Context:**")
+            st.json(other_info)
+    
+    def add_api_metrics(self, api_metrics: List[Dict]):
+        """Add API metrics data for display.
+
+        Args:
+            api_metrics: List of API metrics dictionaries
+        """
+        self.api_metrics_data.extend(api_metrics)
+    
+    def _render_api_logs(self):
+        """Render API call logs and metrics."""
+        st.markdown("### 📊 API Call Logs & Metrics")
+        
+        if not self.api_metrics_data:
+            st.info("No API call data available yet...")
+            return
+        
+        # Calculate summary metrics
+        total_calls = len(self.api_metrics_data)
+        successful_calls = sum(1 for m in self.api_metrics_data if m.get("success", True))
+        error_calls = total_calls - successful_calls
+        total_tokens = sum(m.get("total_tokens", 0) or 0 for m in self.api_metrics_data)
+        total_latency = sum(m.get("latency", 0) or 0 for m in self.api_metrics_data)
+        avg_latency = total_latency / total_calls if total_calls > 0 else 0.0
+        
+        # Estimate total cost (if available in metrics)
+        total_cost = sum(m.get("cost", 0) or 0 for m in self.api_metrics_data)
+        
+        # Display summary metrics
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("Total Calls", total_calls)
+        with col2:
+            st.metric("Success Rate", f"{(successful_calls/total_calls*100):.1f}%" if total_calls > 0 else "0%")
+        with col3:
+            st.metric("Total Tokens", f"{total_tokens:,}")
+        with col4:
+            st.metric("Avg Latency", f"{avg_latency:.2f}s")
+        with col5:
+            st.metric("Est. Cost", f"${total_cost:.4f}")
+        
+        st.divider()
+        
+        # Create tabs for different views
+        tab1, tab2, tab3 = st.tabs(["📈 Metrics Chart", "📋 Call Log", "❌ Errors"])
+        
+        with tab1:
+            # Token usage over time chart
+            if len(self.api_metrics_data) > 0:
+                # Prepare data for chart
+                call_numbers = list(range(1, len(self.api_metrics_data) + 1))
+                token_counts = [m.get("total_tokens", 0) or 0 for m in self.api_metrics_data]
+                latency_values = [m.get("latency", 0) or 0 for m in self.api_metrics_data]
+                
+                # Create token usage chart
+                fig_tokens = go.Figure()
+                fig_tokens.add_trace(go.Scatter(
+                    x=call_numbers,
+                    y=token_counts,
+                    mode='lines+markers',
+                    name='Tokens',
+                    line=dict(color='#4ECDC4', width=2),
+                    marker=dict(size=6)
+                ))
+                fig_tokens.update_layout(
+                    title="Token Usage Over Time",
+                    xaxis_title="API Call #",
+                    yaxis_title="Tokens",
+                    height=300,
+                    showlegend=True
+                )
+                st.plotly_chart(fig_tokens, use_container_width=True)
+                
+                # Create latency chart
+                fig_latency = go.Figure()
+                fig_latency.add_trace(go.Scatter(
+                    x=call_numbers,
+                    y=latency_values,
+                    mode='lines+markers',
+                    name='Latency (s)',
+                    line=dict(color='#FF6B6B', width=2),
+                    marker=dict(size=6)
+                ))
+                fig_latency.update_layout(
+                    title="API Call Latency Over Time",
+                    xaxis_title="API Call #",
+                    yaxis_title="Latency (seconds)",
+                    height=300,
+                    showlegend=True
+                )
+                st.plotly_chart(fig_latency, use_container_width=True)
+        
+        with tab2:
+            # Display call log table
+            if self.api_metrics_data:
+                # Create DataFrame for display
+                log_data = []
+                for idx, metrics in enumerate(self.api_metrics_data):
+                    log_data.append({
+                        "Call #": idx + 1,
+                        "Player": metrics.get("player_id", "N/A"),
+                        "Timestamp": metrics.get("timestamp", "N/A"),
+                        "Tokens": metrics.get("total_tokens", "N/A"),
+                        "Latency (s)": f"{metrics.get('latency', 0) or 0:.2f}",
+                        "Cost": f"${metrics.get('cost', 0) or 0:.4f}",
+                        "Status": "✅" if metrics.get("success", True) else "❌",
+                    })
+                
+                df = pd.DataFrame(log_data)
+                st.dataframe(df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No API call logs available.")
+        
+        with tab3:
+            # Display errors
+            errors = [m for m in self.api_metrics_data if not m.get("success", True)]
+            if errors:
+                st.markdown(f"**Total Errors:** {len(errors)}")
+                for idx, error in enumerate(errors):
+                    with st.expander(f"Error #{idx + 1} - Player {error.get('player_id', 'N/A')} - {error.get('timestamp', 'N/A')}"):
+                        st.markdown(f"**Error Message:**")
+                        st.code(error.get("error", "Unknown error"), language="text")
+                        st.markdown(f"**Metadata:**")
+                        st.json(error.get("metadata", {}))
+            else:
+                st.success("No errors! All API calls were successful.")
     
     def _render_run_history(self):
         """Render detailed history of all rounds showing what each player did."""
@@ -783,10 +1187,26 @@ class Dashboard:
                         st.metric("Extraction", f"{extraction:.2f}")
                         st.metric("Payoff", f"{payoff:.2f}")
                         
-                        # Show reasoning if available
+                        # Show reasoning if available (with prompt if stored)
                         if i in round_data.get("reasoning", {}):
-                            with st.expander("Reasoning"):
-                                st.write(round_data["reasoning"][i])
+                            reasoning_entry = round_data["reasoning"][i]
+                            # Handle both old format (string) and new format (dict)
+                            if isinstance(reasoning_entry, dict):
+                                # New format: show prompt, reasoning, and action
+                                with st.expander("💭 Reasoning & Prompt", expanded=False):
+                                    if "prompt" in reasoning_entry:
+                                        st.markdown("**Prompt:**")
+                                        st.code(reasoning_entry["prompt"], language="text")
+                                        st.divider()
+                                    if "reasoning" in reasoning_entry:
+                                        st.markdown("**Reasoning:**")
+                                        st.markdown(reasoning_entry["reasoning"])
+                                    if "action" in reasoning_entry:
+                                        st.markdown(f"**Action:** {int(reasoning_entry['action'])}")
+                            else:
+                                # Old format: just show reasoning string
+                                with st.expander("Reasoning"):
+                                    st.write(reasoning_entry)
                 
                 # Summary stats
                 st.divider()

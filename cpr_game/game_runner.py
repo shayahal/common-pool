@@ -16,6 +16,7 @@ from .llm_agent import LLMAgent, MockLLMAgent
 from .logging_manager import LoggingManager
 from .dashboard import Dashboard
 from .utils import format_round_summary
+from .logger_setup import setup_logging
 
 
 class GameRunner:
@@ -84,27 +85,27 @@ class GameRunner:
                     config=self.config
                 )
             else:
-                try:
-                    agent = LLMAgent(
-                        player_id=i,
-                        persona=persona,
-                        config=self.config
-                    )
-                except ValueError as e:
-                    print(f"Warning: {e}")
-                    print("Falling back to MockLLMAgent")
-                    agent = MockLLMAgent(
-                        player_id=i,
-                        persona=persona,
-                        config=self.config
-                    )
+                agent = LLMAgent(
+                    player_id=i,
+                    persona=persona,
+                    config=self.config
+                )
 
             self.agents.append(agent)
             print(f"  Player {i}: {persona}")
 
+        # Initialize file logging first (so we can see any errors)
+        log_dir = self.config.get("log_dir", "logs")
+        setup_logging(log_dir=log_dir)
+        
         # Initialize logging - Langfuse is required
         print("Initializing Langfuse logging...")
-        self.logger = LoggingManager(self.config)
+        try:
+            self.logger = LoggingManager(self.config)
+            print("✓ Langfuse client initialized successfully")
+        except Exception as e:
+            print(f"❌ ERROR: Failed to initialize Langfuse: {e}")
+            raise
 
         # Initialize dashboard (optional)
         self.dashboard = Dashboard(self.config)
@@ -155,6 +156,11 @@ class GameRunner:
                 actions[i] = action
                 reasonings.append(reasoning)
 
+                # Get API metrics if available (for LLM agents)
+                api_metrics = None
+                if hasattr(agent, 'get_last_api_metrics'):
+                    api_metrics = agent.get_last_api_metrics()
+
                 # Log generation
                 prompt = agent._build_prompt(obs) if hasattr(agent, '_build_prompt') else ""
                 self.logger.log_generation(
@@ -162,12 +168,33 @@ class GameRunner:
                     prompt=prompt,
                     response=reasoning or "",
                     action=action,
-                    reasoning=reasoning
+                    reasoning=reasoning,
+                    api_metrics=api_metrics
                 )
 
-                # Add to dashboard
-                if self.dashboard and reasoning:
-                    self.dashboard.add_reasoning(i, reasoning)
+                # Add to dashboard with full context
+                if self.dashboard:
+                    # Prepare game state context from observation
+                    game_state_context = {
+                        "resource_level": obs.get("resource_level", [0])[0] if isinstance(obs.get("resource_level"), np.ndarray) else obs.get("resource_level", 0),
+                        "step": obs.get("step", [0])[0] if isinstance(obs.get("step"), np.ndarray) else obs.get("step", step),
+                    }
+                    # Add cumulative payoff if available
+                    if "my_cumulative_payoff" in obs:
+                        my_payoff = obs["my_cumulative_payoff"]
+                        if isinstance(my_payoff, np.ndarray):
+                            game_state_context["my_cumulative_payoff"] = my_payoff[0] if len(my_payoff) > 0 else 0
+                        else:
+                            game_state_context["my_cumulative_payoff"] = my_payoff
+                    
+                    self.dashboard.add_reasoning(
+                        player_id=i,
+                        reasoning=reasoning or "",
+                        prompt=prompt if prompt else None,
+                        action=float(action) if action is not None else None,
+                        game_state=game_state_context,
+                        round_num=step + 1
+                    )
 
             # Execute step
             observations, rewards, terminated, truncated, info = self.env.step(actions)
