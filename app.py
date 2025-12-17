@@ -86,6 +86,9 @@ def _run_game_in_tab(config, use_mock_agents):
         reasoning_container = st.container()
 
         while not done:
+            # Set current round for logging
+            runner.logger.set_current_round(step)
+
             # Get actions from all agents
             actions = []
             reasonings = []

@@ -7,11 +7,7 @@ and LLM reasoning in an interactive dashboard.
 from typing import Dict, List, Optional
 import uuid
 import streamlit as st
-try:
-    from streamlit.errors import StreamlitDuplicateElementKey
-except ImportError:
-    # Fallback for older streamlit versions
-    StreamlitDuplicateElementKey = Exception
+from streamlit.errors import StreamlitDuplicateElementKey
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
@@ -58,17 +54,9 @@ class Dashboard:
         
         # Detailed run history for each step - use session state to persist across reruns
         # Initialize session state if it doesn't exist
-        # Use try/except to handle case where key doesn't exist yet
-        try:
-            self.run_history = st.session_state.dashboard_run_history
-        except (KeyError, AttributeError):
-            # Try to set it, but if that also fails, use a local list
-            try:
-                st.session_state.dashboard_run_history = []
-                self.run_history = st.session_state.dashboard_run_history
-            except (KeyError, AttributeError):
-                # Fallback: use a local list if session state is not available
-                self.run_history = []
+        if "dashboard_run_history" not in st.session_state:
+            st.session_state.dashboard_run_history = []
+        self.run_history = st.session_state.dashboard_run_history
         
         # Chart containers for updating without duplicate keys
         # Will be initialized in update() method using session state
@@ -152,13 +140,9 @@ class Dashboard:
         # extraction_history[0] is round 1 extractions, extraction_history[1] is round 2, etc.
         
         # Ensure we're working with the latest session state
-        # Handle case where session state might not be available
-        try:
-            self.run_history = st.session_state.dashboard_run_history
-        except (KeyError, AttributeError):
-            # If session state not available, ensure we have a local list
-            if not hasattr(self, 'run_history') or self.run_history is None:
-                self.run_history = []
+        if "dashboard_run_history" not in st.session_state:
+            st.session_state.dashboard_run_history = []
+        self.run_history = st.session_state.dashboard_run_history
         
         if len(self.extraction_history) > len(self.run_history):
             # New round data available - process all missing rounds
@@ -222,20 +206,10 @@ class Dashboard:
                     "reasoning": round_reasoning,
                 }
                 # Append directly to session state list (they reference the same object)
-                # Handle case where session state might not be available
-                try:
-                    st.session_state.dashboard_run_history.append(round_data)
-                except (KeyError, AttributeError):
-                    # If session state not available, append to local list
-                    self.run_history.append(round_data)
+                st.session_state.dashboard_run_history.append(round_data)
             
             # Re-sync reference to ensure we're using the latest
-            # Handle case where session state might not be available
-            try:
-                self.run_history = st.session_state.dashboard_run_history
-            except (KeyError, AttributeError):
-                # If session state not available, keep using local list
-                pass
+            self.run_history = st.session_state.dashboard_run_history
 
         # Bar chart race for cumulative payoffs (full width) - ALWAYS FIRST IN GUI
         # Render this BEFORE header to ensure it's the first visual element
@@ -1011,13 +985,9 @@ class Dashboard:
         st.markdown("## 📜 Run History")
         
         # Ensure we're using the latest session state
-        # Handle case where session state might not be available
-        try:
-            self.run_history = st.session_state.dashboard_run_history
-        except (KeyError, AttributeError):
-            # If session state not available, ensure we have a local list
-            if not hasattr(self, 'run_history') or self.run_history is None:
-                self.run_history = []
+        if "dashboard_run_history" not in st.session_state:
+            st.session_state.dashboard_run_history = []
+        self.run_history = st.session_state.dashboard_run_history
         
         if len(self.run_history) == 0:
             st.info("No history available yet. The game will populate this as it progresses.")
@@ -1074,13 +1044,9 @@ class Dashboard:
     def _render_history_table(self):
         """Render history as a compact table."""
         # Ensure we're using the latest session state
-        # Handle case where session state might not be available
-        try:
-            self.run_history = st.session_state.dashboard_run_history
-        except (KeyError, AttributeError):
-            # If session state not available, ensure we have a local list
-            if not hasattr(self, 'run_history') or self.run_history is None:
-                self.run_history = []
+        if "dashboard_run_history" not in st.session_state:
+            st.session_state.dashboard_run_history = []
+        self.run_history = st.session_state.dashboard_run_history
         
         if len(self.run_history) == 0:
             return
@@ -1128,13 +1094,9 @@ class Dashboard:
     def _render_history_detailed(self):
         """Render history with expandable sections for each round."""
         # Ensure we're using the latest session state
-        # Handle case where session state might not be available
-        try:
-            self.run_history = st.session_state.dashboard_run_history
-        except (KeyError, AttributeError):
-            # If session state not available, ensure we have a local list
-            if not hasattr(self, 'run_history') or self.run_history is None:
-                self.run_history = []
+        if "dashboard_run_history" not in st.session_state:
+            st.session_state.dashboard_run_history = []
+        self.run_history = st.session_state.dashboard_run_history
         
         if len(self.run_history) == 0:
             return

@@ -9,13 +9,22 @@ import time
 import numpy as np
 from openai import OpenAI
 from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError, AuthenticationError
+from pydantic import BaseModel, Field, ValidationError
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from .config import CONFIG
-from .utils import parse_extraction_from_text, validate_action
+from .utils import validate_action
 from .logger_setup import get_logger
 from .api_logger import APILogger
 
 logger = get_logger(__name__)
+
+
+class AgentResponse(BaseModel):
+    """Structured output from LLM agent."""
+    reasoning: str = Field(description="The agent's reasoning for the chosen action")
+    action: int = Field(description="The extraction amount as an integer (0 to max_extraction)")
 
 
 class LLMAgent:
@@ -62,7 +71,7 @@ class LLMAgent:
             self.config["persona_prompts"][""]
         )
 
-        # Initialize OpenAI client
+        # Initialize OpenAI client (for API logging)
         api_key = api_key or self.config.get("openai_api_key")
         if not api_key:
             raise ValueError(
@@ -70,6 +79,15 @@ class LLMAgent:
                 "or pass api_key parameter."
             )
         self.client = OpenAI(api_key=api_key)
+        
+        # Initialize LangChain ChatOpenAI with structured output
+        self.llm = ChatOpenAI(
+            model=self.llm_model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            timeout=self.timeout,
+            api_key=api_key
+        ).with_structured_output(AgentResponse)
 
         # Initialize API logger
         log_dir = self.config.get("log_dir", "logs")
@@ -104,7 +122,10 @@ class LLMAgent:
 
         # Get LLM response with timing and logging
         start_time = time.time()
+        structured_response = None
         response_text = None
+        reasoning = None
+        action = None
         api_metrics = {
             "prompt_tokens": None,
             "completion_tokens": None,
@@ -117,25 +138,26 @@ class LLMAgent:
         try:
             logger.debug(f"Player {self.player_id}: Making API call to {self.llm_model}")
             
-            response = self.client.chat.completions.create(
-                model=self.llm_model,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                timeout=self.timeout
-            )
-
-            # Extract response and token usage
-            response_text = response.choices[0].message.content
+            # Use LangChain structured output
+            messages = [
+                SystemMessage(content=self.system_prompt),
+                HumanMessage(content=prompt)
+            ]
             
-            # Extract token usage if available
-            if hasattr(response, 'usage') and response.usage:
-                api_metrics["prompt_tokens"] = response.usage.prompt_tokens
-                api_metrics["completion_tokens"] = response.usage.completion_tokens
-                api_metrics["total_tokens"] = response.usage.total_tokens
+            # Use LangChain callback to get token usage
+            from langchain_community.callbacks import get_openai_callback
+            with get_openai_callback() as cb:
+                structured_response = self.llm.invoke(messages)
+                api_metrics["prompt_tokens"] = cb.prompt_tokens
+                api_metrics["completion_tokens"] = cb.completion_tokens
+                api_metrics["total_tokens"] = cb.total_tokens
+            
+            # Extract reasoning and action from structured response
+            reasoning = structured_response.reasoning
+            action = structured_response.action
+            
+            # Format response text for logging
+            response_text = f"Reasoning: {reasoning}\nAction: {action}"
             
             api_metrics["success"] = True
             api_metrics["latency"] = time.time() - start_time
@@ -190,10 +212,13 @@ class LLMAgent:
                 }
             )
             
-            # Fallback to random action (integer)
-            response_text = f"EXTRACT: {int(np.random.uniform(self.min_extraction, self.max_extraction))}"
+            # Store API metrics for retrieval
+            self.last_api_metrics = api_metrics
             
-        except (AttributeError, IndexError, KeyError) as e:
+            # Re-raise the error instead of falling back
+            raise
+            
+        except (AttributeError, IndexError, KeyError, ValueError, ValidationError) as e:
             api_metrics["latency"] = time.time() - start_time
             api_metrics["error"] = f"{type(e).__name__}: {str(e)}"
             
@@ -219,8 +244,12 @@ class LLMAgent:
                 }
             )
             
-            # Fallback to random action (integer)
-            response_text = f"EXTRACT: {int(np.random.uniform(self.min_extraction, self.max_extraction))}"
+            # Store API metrics for retrieval
+            self.last_api_metrics = api_metrics
+            
+            # Re-raise the error instead of falling back
+            raise
+            
             
         except Exception as e:
             api_metrics["latency"] = time.time() - start_time
@@ -248,18 +277,14 @@ class LLMAgent:
                 }
             )
             
-            # Fallback to random action (integer)
-            response_text = f"EXTRACT: {int(np.random.uniform(self.min_extraction, self.max_extraction))}"
+            # Store API metrics for retrieval
+            self.last_api_metrics = api_metrics
+            
+            # Re-raise the error instead of falling back
+            raise
         
         # Store API metrics for retrieval
         self.last_api_metrics = api_metrics
-
-        # Parse action from response
-        action, reasoning = parse_extraction_from_text(
-            response_text,
-            self.min_extraction,
-            self.max_extraction
-        )
 
         # Validate action
         action = validate_action(action, self.min_extraction, self.max_extraction)
@@ -367,9 +392,10 @@ Resource Status:
 4. Decide how much to extract this round (0-{int(self.max_extraction)})
 5. Your extraction amount must be a whole number (integer)
 6. Explain your reasoning briefly
-7. State your action clearly as "EXTRACT: <integer>"
 
-Your response:"""
+Provide your response with:
+- reasoning: Your explanation for the chosen action
+- action: The extraction amount as an integer (0 to {int(self.max_extraction)})"""
 
         return prompt
 

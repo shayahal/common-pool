@@ -117,15 +117,10 @@ def parse_extraction_from_text(text: str, min_val: float = 0.0, max_val: float =
         if reasoning_end > 0:
             reasoning = text[:reasoning_end].strip()
     else:
-        # Fallback: find last number in the text
-        numbers = re.findall(r"[+-]?\d+\.?\d*", text)
-        if numbers:
-            value = float(numbers[-1])
-            reasoning = text.strip()
-        else:
-            # No number found, default to minimum
-            value = min_val
-            reasoning = text.strip()
+        # No EXTRACT pattern found - raise error instead of falling back
+        raise ValueError(
+            f"Could not find 'EXTRACT: <number>' pattern in text: {text[:100]}"
+        )
 
     # Clip to valid range (keep as float)
     value = float(np.clip(value, min_val, max_val))

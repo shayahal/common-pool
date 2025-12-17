@@ -146,6 +146,9 @@ class GameRunner:
         step = 0
 
         while not done:
+            # Set current round for logging
+            self.logger.set_current_round(step)
+
             # Get actions from all agents
             actions = np.zeros(self.config['n_players'])
             reasonings = []
