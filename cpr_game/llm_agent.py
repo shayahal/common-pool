@@ -162,12 +162,13 @@ Resource Status:
                 idx = -(history_length - i)
                 round_num = len(self.action_history) + idx
                 extraction = self.action_history[idx]
-                reward = self.reward_history[idx] if idx < len(self.reward_history) else 0.0
+                # Check if reward_history has enough elements for this negative index
+                reward = self.reward_history[idx] if abs(idx) <= len(self.reward_history) else 0.0
                 prompt += f"- Round {round_num}: Extracted {extraction:.2f}, Earned {reward:.2f}\n"
             prompt += "\n"
 
         # Add other players' history if enabled
-        if self.config["show_other_players_actions"] and other_extractions.shape[0] > 0:
+        if self.config["show_other_players_actions"] and len(self.action_history) > 0 and other_extractions.shape[0] > 0:
             prompt += "Other Players' History:\n"
 
             # Get the number of other players
@@ -181,10 +182,12 @@ Resource Status:
                 history_length = min(len(self.action_history), self.history_rounds)
                 for i in range(history_length):
                     idx = -(history_length - i)
-                    if idx < len(self.action_history):
-                        round_num = len(self.action_history) + idx
-                        # Get extraction from history (other_extractions is padded with zeros)
-                        extraction = other_extractions[idx, player_idx]
+                    round_num = len(self.action_history) + idx
+                    # Get extraction from history (other_extractions is padded with zeros)
+                    # Use positive indexing relative to available history
+                    obs_idx = i
+                    if obs_idx < other_extractions.shape[0]:
+                        extraction = other_extractions[obs_idx, player_idx]
                         if extraction > 0 or round_num >= 0:  # Only show if not padding
                             prompt += f"  Round {round_num}: Extracted {extraction:.2f}\n"
 

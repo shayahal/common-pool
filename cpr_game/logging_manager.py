@@ -290,7 +290,7 @@ class LoggingManager:
 
     def __del__(self):
         """Cleanup: flush any pending traces."""
-        if self.enabled and self.client:
+        if self.enabled and hasattr(self, 'client') and self.client:
             try:
                 self.client.flush()
             except:
