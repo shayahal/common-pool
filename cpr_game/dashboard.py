@@ -7,7 +7,11 @@ and LLM reasoning in an interactive dashboard.
 from typing import Dict, List, Optional
 import uuid
 import streamlit as st
-from streamlit.errors import StreamlitDuplicateElementKey
+try:
+    from streamlit.errors import StreamlitDuplicateElementKey
+except ImportError:
+    # Fallback for older streamlit versions
+    StreamlitDuplicateElementKey = Exception
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
@@ -44,7 +48,7 @@ class Dashboard:
         self.threshold_color = self.config["threshold_color"]
 
         # Game state tracking
-        self.resource_history: List[float] = []
+        self.resource_history: List[int] = []
         self.extraction_history: List[np.ndarray] = []
         self.payoff_history: List[np.ndarray] = []
         self.cooperation_history: List[float] = []
@@ -52,10 +56,17 @@ class Dashboard:
         
         # Detailed run history for each step - use session state to persist across reruns
         # Initialize session state if it doesn't exist
-        if "dashboard_run_history" not in st.session_state:
-            st.session_state.dashboard_run_history = []
-        # Always get reference from session state to ensure consistency
-        self.run_history = st.session_state.dashboard_run_history
+        # Use try/except to handle case where key doesn't exist yet
+        try:
+            self.run_history = st.session_state.dashboard_run_history
+        except (KeyError, AttributeError):
+            # Try to set it, but if that also fails, use a local list
+            try:
+                st.session_state.dashboard_run_history = []
+                self.run_history = st.session_state.dashboard_run_history
+            except (KeyError, AttributeError):
+                # Fallback: use a local list if session state is not available
+                self.run_history = []
         
         # Chart containers for updating without duplicate keys
         # Will be initialized in update() method using session state
@@ -96,12 +107,15 @@ class Dashboard:
         # Check if containers already exist in session state
         if containers_key not in st.session_state:
             # Create containers for each chart type
+            # IMPORTANT: Order matters! Containers render in creation order.
+            # bar_race must be FIRST to appear at the top of the GUI
             st.session_state[containers_key] = {
+                "bar_race": st.empty(),  # FIRST - appears at top
+                "header": st.empty(),
                 "resource": st.empty(),
                 "extraction": st.empty(),
                 "payoff": st.empty(),
                 "cooperation": st.empty(),
-                "bar_race": st.empty(),
             }
         
         return st.session_state[containers_key]
@@ -136,7 +150,13 @@ class Dashboard:
         # extraction_history[0] is round 1 extractions, extraction_history[1] is round 2, etc.
         
         # Ensure we're working with the latest session state
-        self.run_history = st.session_state.dashboard_run_history
+        # Handle case where session state might not be available
+        try:
+            self.run_history = st.session_state.dashboard_run_history
+        except (KeyError, AttributeError):
+            # If session state not available, ensure we have a local list
+            if not hasattr(self, 'run_history') or self.run_history is None:
+                self.run_history = []
         
         if len(self.extraction_history) > len(self.run_history):
             # New round data available - process all missing rounds
@@ -193,41 +213,58 @@ class Dashboard:
                     "reasoning": round_reasoning,
                 }
                 # Append directly to session state list (they reference the same object)
-                st.session_state.dashboard_run_history.append(round_data)
+                # Handle case where session state might not be available
+                try:
+                    st.session_state.dashboard_run_history.append(round_data)
+                except (KeyError, AttributeError):
+                    # If session state not available, append to local list
+                    self.run_history.append(round_data)
             
             # Re-sync reference to ensure we're using the latest
-            self.run_history = st.session_state.dashboard_run_history
+            # Handle case where session state might not be available
+            try:
+                self.run_history = st.session_state.dashboard_run_history
+            except (KeyError, AttributeError):
+                # If session state not available, keep using local list
+                pass
 
-        # Header metrics
-        self._render_header(game_state)
+        # Bar chart race for cumulative payoffs (full width) - ALWAYS FIRST IN GUI
+        # Render this BEFORE header to ensure it's the first visual element
+        if len(self.payoff_history) > 0:
+            self._render_bar_chart_race(container=self._chart_containers.get("bar_race") if self._chart_containers else None)
 
-        # Only render charts and tabs when game is done
+        # Header metrics - render in container to replace instead of append
+        header_container = self._chart_containers.get("header") if self._chart_containers else None
+        if header_container:
+            # Clear and render header in container to replace instead of append
+            with header_container:
+                self._render_header(game_state)
+        else:
+            self._render_header(game_state)
+        
+        if len(self.resource_history) > 0:
+            # Organize charts in columns for better layout
+            # Columns structure is stable, chart content updates via containers
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if self.config["plots"]["resource_over_time"]:
+                    self._render_resource_chart(container=self._chart_containers.get("resource") if self._chart_containers else None)
+
+                if self.config["plots"]["cooperation_index"] and len(self.cooperation_history) > 0:
+                    self._render_cooperation_chart(container=self._chart_containers.get("cooperation") if self._chart_containers else None)
+
+            with col2:
+                if self.config["plots"]["individual_extractions"] and len(self.extraction_history) > 0:
+                    self._render_extraction_chart(container=self._chart_containers.get("extraction") if self._chart_containers else None)
+
+        # Only show summary and tabs when game is done
         if game_state.get("done", False):
             # Create tabs for different views
             tab1, tab2 = st.tabs(["📊 Charts & Metrics", "💭 Reasoning Log"])
 
             with tab1:
-                # Charts
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    if self.config["plots"]["resource_over_time"]:
-                        self._render_resource_chart(container=self._chart_containers.get("resource") if self._chart_containers else None)
-
-                    if self.config["plots"]["cooperation_index"]:
-                        self._render_cooperation_chart(container=self._chart_containers.get("cooperation") if self._chart_containers else None)
-
-                with col2:
-                    if self.config["plots"]["individual_extractions"]:
-                        self._render_extraction_chart(container=self._chart_containers.get("extraction") if self._chart_containers else None)
-
-                    if self.config["plots"]["cumulative_payoffs"]:
-                        self._render_payoff_chart(container=self._chart_containers.get("payoff") if self._chart_containers else None)
-                
-                # Bar chart race for cumulative payoffs
-                self._render_bar_chart_race(container=self._chart_containers.get("bar_race") if self._chart_containers else None)
-                
-                # Show summary
+                # Summary
                 summary = self._calculate_summary(game_state)
                 self.show_summary(summary)
 
@@ -270,7 +307,7 @@ class Dashboard:
         with cols[0]:
             st.metric(
                 "Resource Level",
-                f"{current_resource:.1f}",
+                f"{int(current_resource)}",
                 delta=None
             )
 
@@ -363,7 +400,7 @@ class Dashboard:
 
         # Use container if provided, otherwise render directly (for backward compatibility)
         if container:
-            container.plotly_chart(fig, width='stretch', use_container_width=True)
+            container.plotly_chart(fig, width='stretch')
         else:
             st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_resource_chart")
 
@@ -408,7 +445,7 @@ class Dashboard:
 
         # Use container if provided, otherwise render directly (for backward compatibility)
         if container:
-            container.plotly_chart(fig, width='stretch', use_container_width=True)
+            container.plotly_chart(fig, width='stretch')
         else:
             st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_extraction_chart")
 
@@ -459,7 +496,7 @@ class Dashboard:
 
         # Use container if provided, otherwise render directly (for backward compatibility)
         if container:
-            container.plotly_chart(fig, width='stretch', use_container_width=True)
+            container.plotly_chart(fig, width='stretch')
         else:
             st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_payoff_chart")
 
@@ -501,7 +538,7 @@ class Dashboard:
 
         # Use container if provided, otherwise render directly (for backward compatibility)
         if container:
-            container.plotly_chart(fig, width='stretch', use_container_width=True)
+            container.plotly_chart(fig, width='stretch')
         else:
             st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_cooperation_chart")
 
@@ -543,7 +580,13 @@ class Dashboard:
         st.markdown("## 📜 Run History")
         
         # Ensure we're using the latest session state
-        self.run_history = st.session_state.dashboard_run_history
+        # Handle case where session state might not be available
+        try:
+            self.run_history = st.session_state.dashboard_run_history
+        except (KeyError, AttributeError):
+            # If session state not available, ensure we have a local list
+            if not hasattr(self, 'run_history') or self.run_history is None:
+                self.run_history = []
         
         if len(self.run_history) == 0:
             st.info("No history available yet. The game will populate this as it progresses.")
@@ -600,7 +643,13 @@ class Dashboard:
     def _render_history_table(self):
         """Render history as a compact table."""
         # Ensure we're using the latest session state
-        self.run_history = st.session_state.dashboard_run_history
+        # Handle case where session state might not be available
+        try:
+            self.run_history = st.session_state.dashboard_run_history
+        except (KeyError, AttributeError):
+            # If session state not available, ensure we have a local list
+            if not hasattr(self, 'run_history') or self.run_history is None:
+                self.run_history = []
         
         if len(self.run_history) == 0:
             return
@@ -620,8 +669,8 @@ class Dashboard:
             
             row = {
                 "Round": round_data["round"],
-                "Resource Before": f"{round_data['resource_before']:.2f}",
-                "Resource After": f"{round_data['resource_after']:.2f}",
+                "Resource Before": f"{int(round_data['resource_before'])}",
+                "Resource After": f"{int(round_data['resource_after'])}",
                 "Cooperation": f"{round_data['cooperation_index']:.3f}",
             }
             
@@ -648,7 +697,13 @@ class Dashboard:
     def _render_history_detailed(self):
         """Render history with expandable sections for each round."""
         # Ensure we're using the latest session state
-        self.run_history = st.session_state.dashboard_run_history
+        # Handle case where session state might not be available
+        try:
+            self.run_history = st.session_state.dashboard_run_history
+        except (KeyError, AttributeError):
+            # If session state not available, ensure we have a local list
+            if not hasattr(self, 'run_history') or self.run_history is None:
+                self.run_history = []
         
         if len(self.run_history) == 0:
             return
@@ -673,19 +728,19 @@ class Dashboard:
             
             # Create expandable section
             with st.expander(
-                f"Round {round_num} - Resource: {round_data['resource_before']:.2f} → {round_data['resource_after']:.2f} | "
+                f"Round {round_num} - Resource: {int(round_data['resource_before'])} → {int(round_data['resource_after'])} | "
                 f"Cooperation: {round_data['cooperation_index']:.3f}",
                 expanded=(round_data == display_history[0])  # Expand most recent
             ):
                 # Resource info
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("Resource Before", f"{round_data['resource_before']:.2f}")
+                    st.metric("Resource Before", f"{int(round_data['resource_before'])}")
                 with col2:
-                    st.metric("Resource After", f"{round_data['resource_after']:.2f}")
+                    st.metric("Resource After", f"{int(round_data['resource_after'])}")
                 with col3:
                     resource_change = round_data['resource_after'] - round_data['resource_before']
-                    st.metric("Resource Change", f"{resource_change:+.2f}")
+                    st.metric("Resource Change", f"{resource_change:+d}")
                 
                 st.divider()
                 
@@ -799,17 +854,18 @@ class Dashboard:
             )
             frames.append(frame_data)
         
-        # Initial data (first round)
+        # Initial data (latest round to show current state)
         if n_rounds > 0:
-            initial_payoffs = cumulative[0, :]
-            sorted_indices = np.argsort(initial_payoffs)
+            # Show latest round by default
+            latest_payoffs = cumulative[-1, :]
+            sorted_indices = np.argsort(latest_payoffs)
             initial_data = [
                 go.Bar(
-                    x=[initial_payoffs[i] for i in sorted_indices],
+                    x=[latest_payoffs[i] for i in sorted_indices],
                     y=[f"Player {i}" for i in sorted_indices],
                     orientation='h',
                     marker_color=[self.player_colors[i % len(self.player_colors)] for i in sorted_indices],
-                    text=[f"{initial_payoffs[i]:.1f}" for i in sorted_indices],
+                    text=[f"{latest_payoffs[i]:.1f}" for i in sorted_indices],
                     textposition='outside',
                 )
             ]
@@ -853,7 +909,7 @@ class Dashboard:
                 ]
             }],
             sliders=[{
-                "active": 0,
+                "active": n_rounds - 1 if n_rounds > 0 else 0,  # Always show latest round
                 "steps": [
                     {
                         "args": [[f"round_{i}"], {
@@ -877,8 +933,9 @@ class Dashboard:
         )
         
         # Use container if provided, otherwise render directly
+        # ALWAYS use 100% width
         if container:
-            container.plotly_chart(fig, width='stretch', use_container_width=True)
+            container.plotly_chart(fig, width='stretch')
         else:
             st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_bar_race")
     
@@ -897,7 +954,7 @@ class Dashboard:
             st.metric("Total Rounds", summary.get("total_rounds", 0))
             st.metric(
                 "Final Resource",
-                f"{summary.get('final_resource_level', 0):.1f}"
+                f"{int(summary.get('final_resource_level', 0))}"
             )
 
         with col2:

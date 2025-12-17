@@ -22,7 +22,7 @@ def example_1_basic_game():
     print("=" * 70 + "\n")
 
     # Create runner with mock agents (no API keys needed)
-    runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+    runner = GameRunner(use_mock_agents=True)
 
     # Setup and run
     runner.setup_game("example_basic")
@@ -54,7 +54,7 @@ def example_2_custom_config():
     print(f"  Initial resource: {custom_config['initial_resource']}")
     print()
 
-    runner = GameRunner(custom_config, use_mock_agents=True, use_mock_logging=True)
+    runner = GameRunner(custom_config, use_mock_agents=True)
     runner.setup_game("example_custom")
     summary = runner.run_episode(verbose=False)
 
@@ -67,7 +67,7 @@ def example_3_tournament():
     print("EXAMPLE 3: Tournament Mode")
     print("=" * 70 + "\n")
 
-    runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+    runner = GameRunner(use_mock_agents=True)
 
     # Run 5 games
     results = runner.run_tournament(n_games=5, verbose=False)
@@ -99,7 +99,7 @@ def example_4_persona_comparison():
         config['player_personas'] = [persona_0, persona_1]
         config['max_steps'] = 50
 
-        runner = GameRunner(config, use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(config, use_mock_agents=True)
         runner.setup_game(f"{persona_0}_vs_{persona_1}")
         summary = runner.run_episode(verbose=False)
 
@@ -117,7 +117,7 @@ def example_5_export_results():
     print("EXAMPLE 5: Export Results")
     print("=" * 70 + "\n")
 
-    runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+    runner = GameRunner(use_mock_agents=True)
 
     # Run multiple games
     for i in range(3):

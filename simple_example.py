@@ -14,7 +14,7 @@ print("Example 1: Basic 20-round Game")
 print("=" * 75)
 
 # Create runner with mock agents (no API keys needed!)
-runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+runner = GameRunner(use_mock_agents=True)
 runner.setup_game("demo_game")
 
 # Run game without visualization (to avoid Streamlit warnings)
@@ -42,7 +42,7 @@ config['max_steps'] = 30
 config['regeneration_rate'] = 1.5
 config['initial_resource'] = 500
 
-runner2 = GameRunner(config, use_mock_agents=True, use_mock_logging=True)
+runner2 = GameRunner(config, use_mock_agents=True)
 runner2.setup_game("custom_game")
 summary2 = runner2.run_episode(visualize=False, verbose=False)
 
@@ -55,7 +55,7 @@ print("\n" + "=" * 75)
 print("Example 3: Tournament (5 games)")
 print("=" * 75)
 
-runner3 = GameRunner(use_mock_agents=True, use_mock_logging=True)
+runner3 = GameRunner(use_mock_agents=True, )
 results = []
 
 for i in range(5):

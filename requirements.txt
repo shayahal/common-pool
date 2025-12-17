@@ -7,7 +7,7 @@ openai>=1.0.0
 langchain>=0.1.0
 
 # Logging
-langfuse>=2.0.0
+langfuse==3.11.0
 
 # Visualization
 streamlit>=1.31.0
@@ -26,3 +26,4 @@ pytest-cov>=4.1.0
 # Utilities
 python-dotenv>=1.0.0
 pyyaml>=6.0.0
+packaging>=21.0

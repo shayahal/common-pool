@@ -40,7 +40,8 @@ MAX_FISHES: int = 100  # Maximum resource level at any given step (capacity cap)
 # Reward Parameters
 # ============================================================================
 
-EXTRACTION_VALUE: int = 1  # Value per unit extracted
+# Note: Extraction value is always 1 (reward = extraction amount)
+# No separate EXTRACTION_VALUE constant needed
 
 # ============================================================================
 # Game Mechanics
@@ -109,8 +110,7 @@ LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
 LANGFUSE_HOST: str = "https://cloud.langfuse.com"
 
-# Enable/disable Langfuse logging (useful when API keys not available)
-LANGFUSE_ENABLED: bool = bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
+# Langfuse is always required - no enabled flag needed
 
 # Trace Settings
 LOG_LEVEL: str = "detailed"  # "minimal", "standard", "detailed"
@@ -208,8 +208,7 @@ CONFIG: Dict = {
     "show_other_players_actions": SHOW_OTHER_PLAYERS_ACTIONS,
     "allow_reasoning_output": ALLOW_REASONING_OUTPUT,
 
-    # Langfuse
-    "langfuse_enabled": LANGFUSE_ENABLED,
+    # Langfuse (always required)
     "langfuse_public_key": LANGFUSE_PUBLIC_KEY,
     "langfuse_secret_key": LANGFUSE_SECRET_KEY,
     "langfuse_host": LANGFUSE_HOST,
@@ -280,5 +279,16 @@ def validate_config(config: Dict) -> bool:
 
     if len(config["player_personas"]) < config["n_players"]:
         raise ValueError(f"Not enough personas defined for {config['n_players']} players")
+
+    # Langfuse is required - check that keys are provided
+    public_key = config.get("langfuse_public_key", "")
+    secret_key = config.get("langfuse_secret_key", "")
+    
+    # Check if keys are actually provided (not just empty strings)
+    if not public_key or not secret_key:
+        raise ValueError(
+            "Langfuse API keys are required. Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY environment variables, "
+            "or provide langfuse_public_key and langfuse_secret_key in config."
+        )
 
     return True

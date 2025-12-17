@@ -13,7 +13,7 @@ from pathlib import Path
 from .config import CONFIG, validate_config
 from .cpr_environment import CPREnvironment
 from .llm_agent import LLMAgent, MockLLMAgent
-from .logging_manager import LoggingManager, MockLoggingManager
+from .logging_manager import LoggingManager
 from .dashboard import Dashboard
 from .utils import format_round_summary
 
@@ -27,15 +27,13 @@ class GameRunner:
     def __init__(
         self,
         config: Optional[Dict] = None,
-        use_mock_agents: bool = False,
-        use_mock_logging: bool = False
+        use_mock_agents: bool = False
     ):
         """Initialize game runner.
 
         Args:
             config: Configuration dictionary
             use_mock_agents: Use MockLLMAgent instead of real LLM calls
-            use_mock_logging: Use MockLoggingManager instead of Langfuse
         """
         self.config = config if config is not None else CONFIG.copy()
 
@@ -44,12 +42,11 @@ class GameRunner:
 
         # Flags
         self.use_mock_agents = use_mock_agents
-        self.use_mock_logging = use_mock_logging
 
         # Components (initialized in setup)
         self.env: Optional[CPREnvironment] = None
         self.agents: List[Union[LLMAgent, MockLLMAgent]] = []
-        self.logger: Optional[Union[LoggingManager, MockLoggingManager]] = None
+        self.logger: Optional[LoggingManager] = None
         self.dashboard: Optional[Dashboard] = None
 
         # Game state
@@ -105,13 +102,9 @@ class GameRunner:
             self.agents.append(agent)
             print(f"  Player {i}: {persona}")
 
-        # Initialize logging
-        if self.use_mock_logging or not self.config.get("langfuse_enabled", False):
-            print("Using mock logging (Langfuse disabled)")
-            self.logger = MockLoggingManager(self.config)
-        else:
-            print("Initializing Langfuse logging...")
-            self.logger = LoggingManager(self.config)
+        # Initialize logging - Langfuse is required
+        print("Initializing Langfuse logging...")
+        self.logger = LoggingManager(self.config)
 
         # Initialize dashboard (optional)
         self.dashboard = Dashboard(self.config)
@@ -356,7 +349,7 @@ def quick_game(
     config["n_players"] = n_players
     config["max_steps"] = max_steps
 
-    runner = GameRunner(config, use_mock_agents=use_mock, use_mock_logging=True)
+    runner = GameRunner(config, use_mock_agents=use_mock)
     runner.setup_game()
     summary = runner.run_episode(visualize=False, verbose=verbose)
 
@@ -368,7 +361,7 @@ if __name__ == "__main__":
     print("Running example CPR game...\n")
 
     # Create runner with mock agents (no API calls required)
-    runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+    runner = GameRunner(use_mock_agents=True)
 
     # Setup game
     runner.setup_game()

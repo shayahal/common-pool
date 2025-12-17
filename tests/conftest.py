@@ -21,7 +21,8 @@ def sample_config():
         "include_history_rounds": 5,
         "show_other_players_actions": True,
         "player_personas": ["rational_selfish", "cooperative"],
-        "langfuse_enabled": False,
+        "langfuse_public_key": "test_public_key",
+        "langfuse_secret_key": "test_secret_key",
     }
 
 

@@ -89,7 +89,7 @@ LANGFUSE_SECRET_KEY=sk-lf-...
 from cpr_game import GameRunner
 
 # Real LLM agents
-runner = GameRunner(use_mock_agents=False, use_mock_logging=False)
+runner = GameRunner(use_mock_agents=False)
 runner.setup_game()
 summary = runner.run_episode(verbose=True)
 ```
@@ -155,9 +155,12 @@ runner = GameRunner(use_mock_agents=True)  # No API key needed
 
 ### Langfuse Connection Error
 
-**Solution**: Disable Langfuse or use mock logging
+**Solution**: Ensure Langfuse API keys are set correctly
 ```python
-runner = GameRunner(use_mock_logging=True)
+# Langfuse is always required - set environment variables:
+# LANGFUSE_PUBLIC_KEY=your_public_key
+# LANGFUSE_SECRET_KEY=your_secret_key
+runner = GameRunner(use_mock_agents=True)
 ```
 
 ---

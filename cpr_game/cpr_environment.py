@@ -40,9 +40,9 @@ class CPREnvironment(gym.Env):
         # Game parameters
         self.n_players = self.config["n_players"]
         self.max_steps = self.config["max_steps"]
-        self.initial_resource = float(self.config["initial_resource"])
+        self.initial_resource = self.config["initial_resource"]
         self.regeneration_rate = float(self.config["regeneration_rate"])
-        self.min_resource = float(self.config["min_resource"])
+        self.min_resource = self.config["min_resource"]
         max_fishes_val = self.config.get("max_fishes", float("inf"))
         self.max_fishes = float(max_fishes_val) if max_fishes_val != float("inf") else max_fishes_val
         
@@ -86,12 +86,12 @@ class CPREnvironment(gym.Env):
         })
 
         # Game state
-        self.current_resource: float = 0.0
+        self.current_resource: int = 0
         self.current_step: int = 0
         self.extraction_history: List[np.ndarray] = []
         self.payoff_history: List[np.ndarray] = []
         self.player_cumulative_payoffs: np.ndarray = np.zeros(self.n_players)
-        self.resource_history: List[float] = []
+        self.resource_history: List[int] = []
         self.cooperation_history: List[float] = []
 
         # Game status
@@ -114,12 +114,12 @@ class CPREnvironment(gym.Env):
         super().reset(seed=seed)
 
         # Reset game state
-        self.current_resource = float(self.initial_resource)
+        self.current_resource = self.initial_resource
         self.current_step = 0
         self.extraction_history = []
         self.payoff_history = []
         self.player_cumulative_payoffs = np.zeros(self.n_players)
-        self.resource_history = [float(self.initial_resource)]
+        self.resource_history = [self.initial_resource]
         self.cooperation_history = []
         self.done = False
 
@@ -158,7 +158,7 @@ class CPREnvironment(gym.Env):
         total_extraction = np.sum(actions)
 
         # Store resource before step for reward calculation
-        resource_before_step = float(self.current_resource)
+        resource_before_step = self.current_resource
 
         # Update resource with regeneration and extraction
         # R(t+1) = max(min(R(t) * regeneration_rate, max_fishes) - sum(extractions), min_resource)
@@ -166,13 +166,15 @@ class CPREnvironment(gym.Env):
         # Cap regeneration at max_fishes (resource capacity limit)
         if self.max_fishes != float("inf"):
             regenerated_resource = min(regenerated_resource, self.max_fishes)
+        # Calculate new resource and ensure it's an integer
+        new_resource = regenerated_resource - total_extraction
         self.current_resource = max(
-            regenerated_resource - total_extraction,
+            int(new_resource),
             self.min_resource
         )
 
         # Store resource level
-        self.resource_history.append(float(self.current_resource))
+        self.resource_history.append(self.current_resource)
 
         # Calculate rewards
         rewards = self._compute_rewards(actions, resource_before_step)
@@ -207,7 +209,7 @@ class CPREnvironment(gym.Env):
 
         # Build info dict
         info = {
-            "resource": float(self.current_resource),
+            "resource": self.current_resource,
             "step": self.current_step,
             "total_extraction": float(total_extraction),
             "cooperation_index": cooperation,
@@ -217,7 +219,7 @@ class CPREnvironment(gym.Env):
 
         return observations, rewards, terminated, truncated, info
 
-    def _compute_rewards(self, actions: np.ndarray, resource_before_step: float) -> np.ndarray:
+    def _compute_rewards(self, actions: np.ndarray, resource_before_step: int) -> np.ndarray:
         """Calculate rewards for each player based on their actions.
 
         Reward function:
@@ -359,10 +361,10 @@ class CPREnvironment(gym.Env):
 
         elif mode == "dict":
             return {
-                "resource": float(self.current_resource),
+                "resource": self.current_resource,
                 "step": self.current_step,
                 "max_steps": self.max_steps,
-                "resource_history": [float(r) for r in self.resource_history],
+                "resource_history": self.resource_history.copy(),
                 "extraction_history": [e.copy() for e in self.extraction_history],
                 "payoff_history": [p.copy() for p in self.payoff_history],
                 "cumulative_payoffs": self.player_cumulative_payoffs.copy(),
@@ -388,7 +390,7 @@ class CPREnvironment(gym.Env):
         
         return {
             "total_rounds": self.current_step,
-            "final_resource_level": float(self.current_resource),
+            "final_resource_level": self.current_resource,
             "cumulative_payoffs": self.player_cumulative_payoffs.tolist(),
             "sustainability_score": float(sustainability_score),
             "tragedy_occurred": bool(self.current_resource <= self.min_resource),

@@ -49,6 +49,7 @@ htmlcov/
 
 # Logs
 *.log
+logs/
 
 # Results
 experiments/results_*.json

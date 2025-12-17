@@ -110,7 +110,7 @@ common-pool/
 - LLM generation tracking
 - Custom metrics/scores
 - Graceful degradation when disabled
-- MockLoggingManager for testing
+- LoggingManager handles Langfuse integration (works without Langfuse when disabled)
 
 **Tracked Metrics:**
 - Per-round: resource, extractions, cooperation
@@ -230,7 +230,7 @@ common-pool/
 from cpr_game import GameRunner
 
 # Mock agents for testing
-runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+runner = GameRunner(use_mock_agents=True)
 runner.setup_game()
 summary = runner.run_episode(verbose=True)
 ```

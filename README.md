@@ -41,7 +41,7 @@ LANGFUSE_SECRET_KEY=sk-lf-...
 from cpr_game import GameRunner
 
 # Use mock agents (no API calls needed)
-runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+runner = GameRunner(use_mock_agents=True)
 runner.setup_game()
 summary = runner.run_episode(verbose=True)
 

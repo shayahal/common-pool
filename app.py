@@ -11,9 +11,16 @@ from datetime import datetime
 import uuid
 import pandas as pd
 import hashlib
+import json
+import time
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))
+
+# Setup logs directory
+LOGS_DIR = Path(__file__).parent / "logs"
+LOGS_DIR.mkdir(exist_ok=True)
+DEBUG_LOG_PATH = LOGS_DIR / "debug.log"
 
 from cpr_game.game_runner import GameRunner
 from cpr_game.config import CONFIG
@@ -37,9 +44,7 @@ def main():
         
         # Basic settings - dynamically extract defaults from CONFIG
         # #region agent log
-        with open("/Users/shayyahal/Code/common-pool/.cursor/debug.log", "a") as f:
-            import json
-            import time
+        with open(DEBUG_LOG_PATH, "a") as f:
             n_players_val = CONFIG["n_players"]
             max_steps_val = CONFIG["max_steps"]
             f.write(json.dumps({"sessionId": "debug-session", "runId": "type-check", "hypothesisId": "B", "location": "app.py:38", "message": "slider type checks", "data": {"n_players": {"value": n_players_val, "type": type(n_players_val).__name__}, "max_steps": {"value": max_steps_val, "type": type(max_steps_val).__name__}}, "timestamp": int(time.time() * 1000)}) + "\n")
@@ -52,9 +57,7 @@ def main():
                 value=CONFIG["n_players"]
             )
         except (TypeError, ValueError) as e:
-            with open("/Users/shayyahal/Code/common-pool/.cursor/debug.log", "a") as f:
-                import json
-                import time
+            with open(DEBUG_LOG_PATH, "a") as f:
                 f.write(json.dumps({"sessionId": "debug-session", "runId": "error-catch", "hypothesisId": "D", "location": "app.py:46", "message": "ERROR in n_players slider", "data": {"error": str(e), "value": CONFIG["n_players"], "value_type": type(CONFIG["n_players"]).__name__}, "timestamp": int(time.time() * 1000)}) + "\n")
             raise
         try:
@@ -65,9 +68,7 @@ def main():
                 value=CONFIG["max_steps"]
             )
         except (TypeError, ValueError) as e:
-            with open("/Users/shayyahal/Code/common-pool/.cursor/debug.log", "a") as f:
-                import json
-                import time
+            with open(DEBUG_LOG_PATH, "a") as f:
                 f.write(json.dumps({"sessionId": "debug-session", "runId": "error-catch", "hypothesisId": "D", "location": "app.py:52", "message": "ERROR in max_steps slider", "data": {"error": str(e), "value": CONFIG["max_steps"], "value_type": type(CONFIG["max_steps"]).__name__}, "timestamp": int(time.time() * 1000)}) + "\n")
             raise
         initial_resource = st.number_input(
@@ -81,14 +82,10 @@ def main():
         try:
             regen_rate_val = CONFIG["regeneration_rate"]
             regen_rate_float = float(regen_rate_val)
-            with open("/Users/shayyahal/Code/common-pool/.cursor/debug.log", "a") as f:
-                import json
-                import time
+            with open(DEBUG_LOG_PATH, "a") as f:
                 f.write(json.dumps({"sessionId": "debug-session", "runId": "post-fix", "hypothesisId": "A", "location": "app.py:81", "message": "regeneration_rate conversion", "data": {"original": regen_rate_val, "original_type": type(regen_rate_val).__name__, "converted": regen_rate_float, "converted_type": type(regen_rate_float).__name__}, "timestamp": int(time.time() * 1000)}) + "\n")
         except (TypeError, ValueError) as e:
-            with open("/Users/shayyahal/Code/common-pool/.cursor/debug.log", "a") as f:
-                import json
-                import time
+            with open(DEBUG_LOG_PATH, "a") as f:
                 f.write(json.dumps({"sessionId": "debug-session", "runId": "error", "hypothesisId": "A", "location": "app.py:81", "message": "ERROR converting regeneration_rate", "data": {"error": str(e)}, "timestamp": int(time.time() * 1000)}) + "\n")
         # #endregion
         try:
@@ -100,9 +97,7 @@ def main():
                 step=0.1
             )
         except (TypeError, ValueError) as e:
-            with open("/Users/shayyahal/Code/common-pool/.cursor/debug.log", "a") as f:
-                import json
-                import time
+            with open(DEBUG_LOG_PATH, "a") as f:
                 f.write(json.dumps({"sessionId": "debug-session", "runId": "error-catch", "hypothesisId": "A", "location": "app.py:95", "message": "ERROR in regeneration_rate slider", "data": {"error": str(e), "value": CONFIG["regeneration_rate"], "value_type": type(CONFIG["regeneration_rate"]).__name__, "converted_value": float(CONFIG["regeneration_rate"]), "converted_type": type(float(CONFIG["regeneration_rate"])).__name__}, "timestamp": int(time.time() * 1000)}) + "\n")
             raise
         sustainability_threshold = st.number_input(
@@ -123,7 +118,6 @@ def main():
         # Agent settings
         st.subheader("Agent Settings")
         use_mock_agents = st.checkbox("Use Mock Agents (No API calls)", value=True)
-        use_mock_logging = st.checkbox("Use Mock Logging", value=True)
         
         # Persona selection - dynamically extract from CONFIG
         st.subheader("Player Personas")
@@ -149,26 +143,14 @@ def main():
         # Run button
         run_game = st.button("🚀 Run Game", type="primary", use_container_width=True)
         
-        # Auto-refresh option - dynamically extract from CONFIG
-        auto_refresh = st.checkbox("Auto-refresh during game", value=True)
-        # #region agent log
-        refresh_rate_val = CONFIG.get("refresh_rate", 0.5)
-        with open("/Users/shayyahal/Code/common-pool/.cursor/debug.log", "a") as f:
-            import json
-            import time
-            f.write(json.dumps({"sessionId": "debug-session", "runId": "type-check", "hypothesisId": "C", "location": "app.py:120", "message": "refresh_rate type check", "data": {"value": refresh_rate_val, "type": type(refresh_rate_val).__name__, "is_float": isinstance(refresh_rate_val, float)}, "timestamp": int(time.time() * 1000)}) + "\n")
-        # #endregion
-        refresh_delay = st.slider(
-            "Refresh delay (seconds)", 
-            0.1, 
-            5.0, 
-            float(CONFIG.get("refresh_rate", 0.5)),  # Ensure float type
-            0.1
-        ) if auto_refresh else 0.0
 
     # Initialize runs storage in session state
     if "all_runs" not in st.session_state:
         st.session_state.all_runs = []
+    
+    # Initialize dashboard run history in session state (needed by Dashboard.__init__)
+    if "dashboard_run_history" not in st.session_state:
+        st.session_state.dashboard_run_history = []
     
     # Main content area - show tabs for all runs
     if len(st.session_state.all_runs) > 0:
@@ -183,188 +165,200 @@ def main():
     
     # Run new game
     if run_game:
-        # Create config
-        config = CONFIG.copy()
-        config["n_players"] = n_players
-        config["max_steps"] = max_steps
-        config["initial_resource"] = int(initial_resource)  # Ensure integer
-        config["regeneration_rate"] = regeneration_rate
-        config["sustainability_threshold"] = sustainability_threshold
-        config["max_fishes"] = int(max_fishes)  # Maximum resource capacity, ensure integer
-        config["player_personas"] = personas
+        try:
+            # Create config
+            config = CONFIG.copy()
+            config["n_players"] = n_players
+            config["max_steps"] = max_steps
+            config["initial_resource"] = initial_resource
+            config["regeneration_rate"] = regeneration_rate
+            config["sustainability_threshold"] = sustainability_threshold
+            config["max_fishes"] = max_fishes
+            config["player_personas"] = personas
 
-        # Initialize game runner
-        runner = GameRunner(
-            config=config,
-            use_mock_agents=use_mock_agents,
-            use_mock_logging=use_mock_logging
-        )
-        
-        game_id = runner.setup_game()
+            # Initialize game runner
+            runner = GameRunner(
+                config=config,
+                use_mock_agents=use_mock_agents
+            )
+            
+            game_id = runner.setup_game()
+        except ValueError as e:
+            # Handle configuration errors (e.g., missing Langfuse keys)
+            error_msg = str(e)
+            st.error(f"❌ Configuration Error: {error_msg}")
+            st.info("💡 **Tip**: Make sure you have set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY environment variables.")
+            st.stop()
+        except Exception as e:
+            # Handle any other errors
+            st.error(f"❌ Error initializing game: {str(e)}")
+            st.exception(e)
+            st.stop()
         
         # Create unique run ID for this game
         run_id = str(uuid.uuid4())[:8]
         
-        # Initialize dashboard (skip initialize since we already set page config)
-        dashboard = runner.dashboard
-        if dashboard:
-            # Initialize reasoning log without calling initialize() to avoid page_config conflict
-            for i in range(n_players):
-                if i not in dashboard.reasoning_log:
-                    dashboard.reasoning_log[i] = []
-            
-            # Create new run history for this game
-            dashboard.run_history = []
-        
-        # Start game trace
-        runner.logger.start_game_trace(game_id, config)
-        
-        # Reset environment and agents
-        observations, info = runner.env.reset()
-        for agent in runner.agents:
-            agent.reset()
-        
-        # Main game loop
-        done = False
-        step = 0
-        # Include initial resource in history
-        resource_history = [info["resource"]]  # Start with initial resource
-        extraction_history = []
-        payoff_history = []
-        cooperation_history = []
-        
-        # Progress bar
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        while not done:
-            # Get actions from all agents
-            actions = []
-            reasonings = []
-            
-            for i, agent in enumerate(runner.agents):
-                obs = observations[f"player_{i}"]
-                action, reasoning = agent.act(obs, return_reasoning=True)
-                actions.append(action)
-                reasonings.append(reasoning)
-                
-                # Log generation
-                prompt = agent._build_prompt(obs) if hasattr(agent, '_build_prompt') else ""
-                runner.logger.log_generation(
-                    player_id=i,
-                    prompt=prompt,
-                    response=reasoning or "",
-                    action=action,
-                    reasoning=reasoning
-                )
-                
-                # Add to dashboard
-                if dashboard and reasoning:
-                    dashboard.add_reasoning(i, reasoning)
-            
-            # Execute step
-            actions_array = np.array(actions)
-            observations, rewards, terminated, truncated, info = runner.env.step(actions_array)
-            done = terminated or truncated
-            
-            # Update agent memories
-            for i, agent in enumerate(runner.agents):
-                obs = observations[f"player_{i}"]
-                agent.update_memory(obs, actions[i], rewards[i])
-            
-            # Collect history
-            resource_history.append(info["resource"])
-            extraction_history.append(actions)
-            payoff_history.append(rewards.tolist())
-            cooperation_history.append(info.get("cooperation_index", 0.0))
-            
-            # Log round metrics
-            round_metrics = {
-                "resource_level": info["resource"],
-                "total_extraction": info["total_extraction"],
-                "cooperation_index": info.get("cooperation_index", 0.0),
-                "individual_extractions": actions,
-                "individual_payoffs": rewards.tolist(),
-            }
-            runner.logger.log_round_metrics(step, round_metrics)
-            
-            # Update dashboard
+        try:
+            # Initialize dashboard (skip initialize since we already set page config)
+            dashboard = runner.dashboard
             if dashboard:
-                game_state = {
-                    "resource": info["resource"],
-                    "step": step,
-                    "max_steps": max_steps,
-                    "done": done,
-                    "cumulative_payoffs": info.get("cumulative_payoffs", [sum(payoff_history[j][i] for j in range(len(payoff_history))) for i in range(n_players)]),
-                    "resource_history": resource_history,
-                    "extraction_history": extraction_history,
-                    "payoff_history": payoff_history,
-                    "cooperation_history": cooperation_history,
+                # Initialize reasoning log without calling initialize() to avoid page_config conflict
+                for i in range(n_players):
+                    if i not in dashboard.reasoning_log:
+                        dashboard.reasoning_log[i] = []
+                
+                # Create new run history for this game
+                dashboard.run_history = []
+            
+            # Start game trace
+            runner.logger.start_game_trace(game_id, config)
+            
+            # Reset environment and agents
+            observations, info = runner.env.reset()
+            for agent in runner.agents:
+                agent.reset()
+            
+            # Main game loop
+            done = False
+            step = 0
+            # Include initial resource in history
+            resource_history = [info["resource"]]  # Start with initial resource
+            extraction_history = []
+            payoff_history = []
+            cooperation_history = []
+            
+            # Progress bar
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            while not done:
+                # Get actions from all agents
+                actions = []
+                reasonings = []
+                
+                for i, agent in enumerate(runner.agents):
+                    obs = observations[f"player_{i}"]
+                    action, reasoning = agent.act(obs, return_reasoning=True)
+                    actions.append(action)
+                    reasonings.append(reasoning)
+                    
+                    # Log generation
+                    prompt = agent._build_prompt(obs) if hasattr(agent, '_build_prompt') else ""
+                    runner.logger.log_generation(
+                        player_id=i,
+                        prompt=prompt,
+                        response=reasoning or "",
+                        action=action,
+                        reasoning=reasoning
+                    )
+                    
+                    # Add to dashboard
+                    if dashboard and reasoning:
+                        dashboard.add_reasoning(i, reasoning)
+                
+                # Execute step
+                actions_array = np.array(actions)
+                observations, rewards, terminated, truncated, info = runner.env.step(actions_array)
+                done = terminated or truncated
+                
+                # Update agent memories
+                for i, agent in enumerate(runner.agents):
+                    obs = observations[f"player_{i}"]
+                    agent.update_memory(obs, actions[i], rewards[i])
+                
+                # Collect history
+                resource_history.append(info["resource"])
+                extraction_history.append(actions)
+                payoff_history.append(rewards.tolist())
+                cooperation_history.append(info.get("cooperation_index", 0.0))
+                
+                # Log round metrics
+                round_metrics = {
+                    "resource_level": info["resource"],
+                    "total_extraction": info["total_extraction"],
+                    "cooperation_index": info.get("cooperation_index", 0.0),
+                    "individual_extractions": actions,
+                    "individual_payoffs": rewards.tolist(),
                 }
-                dashboard.update(game_state)
+                runner.logger.log_round_metrics(step, round_metrics)
+                
+                # Update dashboard
+                if dashboard:
+                    game_state = {
+                        "resource": info["resource"],
+                        "step": step,
+                        "max_steps": max_steps,
+                        "done": done,
+                        "cumulative_payoffs": info.get("cumulative_payoffs", [sum(payoff_history[j][i] for j in range(len(payoff_history))) for i in range(n_players)]),
+                        "resource_history": resource_history,
+                        "extraction_history": extraction_history,
+                        "payoff_history": payoff_history,
+                        "cooperation_history": cooperation_history,
+                    }
+                    dashboard.update(game_state)
+                
+                # Update progress
+                progress = (step + 1) / max_steps
+                progress_bar.progress(progress)
+                status_text.text(f"Round {step + 1}/{max_steps} - Resource: {int(info['resource'])}")
+                
+                step += 1
             
-            # Update progress
-            progress = (step + 1) / max_steps
-            progress_bar.progress(progress)
-            status_text.text(f"Round {step + 1}/{max_steps} - Resource: {info['resource']:.1f}")
+            # Get summary statistics
+            summary = runner.env.get_summary_stats()
             
-            step += 1
+            # End logging trace
+            runner.logger.end_game_trace(summary)
             
-            # Auto-refresh (only if enabled and not done)
-            if auto_refresh and not done:
-                time.sleep(refresh_delay)
-                # Note: Streamlit will rerun on its own, but we can't easily do incremental updates
-                # For now, we'll run the full game and then display results
-        
-        # Get summary statistics
-        summary = runner.env.get_summary_stats()
-        
-        # End logging trace
-        runner.logger.end_game_trace(summary)
-        
-        # Clear progress indicators
-        progress_bar.empty()
-        status_text.empty()
-        
-        # Prepare final game state for dashboard
-        final_game_state = {
-            "resource": info["resource"],
-            "step": step,
-            "max_steps": max_steps,
-            "done": True,
-            "cumulative_payoffs": info.get("cumulative_payoffs", []),
-            "resource_history": resource_history,
-            "extraction_history": extraction_history,
-            "payoff_history": payoff_history,
-            "cooperation_history": cooperation_history,
-        }
-        
-        # Update dashboard with final state
-        if dashboard:
-            dashboard.update(final_game_state)
-        
-        # Store complete run data
-        run_data = {
-            "run_id": run_id,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "config": config.copy(),
-            "game_id": game_id,
-            "summary": summary,
-            "resource_history": resource_history,
-            "extraction_history": extraction_history,
-            "payoff_history": payoff_history,
-            "cooperation_history": cooperation_history,
-            "reasoning_log": dashboard.reasoning_log.copy() if dashboard else {},
-            "run_history": dashboard.run_history.copy() if dashboard else [],
-            "generation_data": runner.logger.get_generation_data() if hasattr(runner.logger, 'get_generation_data') else [],
-            "round_metrics": runner.logger.get_round_metrics() if hasattr(runner.logger, 'get_round_metrics') else [],
-        }
-        
-        # Add to session state
-        st.session_state.all_runs.append(run_data)
-        
-        # Force rerun to show new tab
-        st.rerun()
+            # Clear progress indicators
+            progress_bar.empty()
+            status_text.empty()
+            
+            # Prepare final game state for dashboard
+            final_game_state = {
+                "resource": info["resource"],
+                "step": step,
+                "max_steps": max_steps,
+                "done": True,
+                "cumulative_payoffs": info.get("cumulative_payoffs", []),
+                "resource_history": resource_history,
+                "extraction_history": extraction_history,
+                "payoff_history": payoff_history,
+                "cooperation_history": cooperation_history,
+            }
+            
+            # Update dashboard with final state
+            if dashboard:
+                dashboard.update(final_game_state)
+            
+            # Store complete run data
+            run_data = {
+                "run_id": run_id,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "config": config.copy(),
+                "game_id": game_id,
+                "summary": summary,
+                "resource_history": resource_history,
+                "extraction_history": extraction_history,
+                "payoff_history": payoff_history,
+                "cooperation_history": cooperation_history,
+                "reasoning_log": dashboard.reasoning_log.copy() if dashboard else {},
+                "run_history": dashboard.run_history.copy() if dashboard else [],
+                "generation_data": runner.logger.get_generation_data() if hasattr(runner.logger, 'get_generation_data') else [],
+                "round_metrics": runner.logger.get_round_metrics() if hasattr(runner.logger, 'get_round_metrics') else [],
+            }
+            
+            # Add to session state
+            st.session_state.all_runs.append(run_data)
+            
+            # Force rerun to show new tab
+            st.rerun()
+        except Exception as e:
+            # Handle any errors during game execution
+            st.error(f"❌ Error during game execution: {str(e)}")
+            st.exception(e)
+            st.info("💡 **Tip**: Check the error message above and ensure all configuration is correct.")
+            st.stop()
         
     else:
         # Show instructions when not running
@@ -427,7 +421,7 @@ def _display_run_data(run_data: dict):
         tragedy = summary.get("tragedy_occurred", False)
         st.metric("Tragedy", "Yes" if tragedy else "No")
     with col3:
-        st.metric("Final Resource", f"{summary.get('final_resource_level', 0):.1f}")
+        st.metric("Final Resource", f"{int(summary.get('final_resource_level', 0))}")
     with col4:
         st.metric("Avg Cooperation", f"{summary.get('avg_cooperation_index', 0):.3f}")
     
@@ -451,6 +445,9 @@ def _display_run_data(run_data: dict):
             "cooperation_history": run_data.get("cooperation_history", []),
         }
         
+        # Bar chart race - ALWAYS FIRST AND ON TOP
+        temp_dashboard._render_bar_chart_race()
+        
         # Render charts
         col1, col2 = st.columns(2)
         
@@ -460,10 +457,6 @@ def _display_run_data(run_data: dict):
         
         with col2:
             temp_dashboard._render_extraction_chart()
-            temp_dashboard._render_payoff_chart()
-        
-        # Bar chart race
-        temp_dashboard._render_bar_chart_race()
         
         # Show summary
         temp_dashboard.show_summary(summary)

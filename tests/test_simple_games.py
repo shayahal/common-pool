@@ -20,7 +20,7 @@ class TestSimpleGame1_BasicGame:
 
     def test_basic_game_setup(self):
         """Test that basic game can be set up."""
-        runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(use_mock_agents=True)
         game_id = runner.setup_game("demo_game")
         
         assert game_id == "demo_game"
@@ -30,7 +30,7 @@ class TestSimpleGame1_BasicGame:
 
     def test_basic_game_run(self):
         """Test that basic game runs to completion."""
-        runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(use_mock_agents=True)
         runner.setup_game("demo_game")
         
         summary = runner.run_episode(visualize=False, verbose=False)
@@ -53,7 +53,7 @@ class TestSimpleGame1_BasicGame:
 
     def test_basic_game_results_structure(self):
         """Test that basic game results have expected structure."""
-        runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(use_mock_agents=True)
         runner.setup_game("demo_game")
         summary = runner.run_episode(visualize=False, verbose=False)
         
@@ -74,7 +74,7 @@ class TestSimpleGame1_BasicGame:
 
     def test_basic_game_payoffs_are_positive(self):
         """Test that players receive positive payoffs."""
-        runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(use_mock_agents=True)
         runner.setup_game("demo_game")
         summary = runner.run_episode(visualize=False, verbose=False)
         
@@ -93,7 +93,7 @@ class TestSimpleGame2_CustomSettings:
         config['regeneration_rate'] = 1.5
         config['initial_resource'] = 500
         
-        runner = GameRunner(config, use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(config, use_mock_agents=True)
         game_id = runner.setup_game("custom_game")
         
         assert game_id == "custom_game"
@@ -108,7 +108,7 @@ class TestSimpleGame2_CustomSettings:
         config['regeneration_rate'] = 1.5
         config['initial_resource'] = 500
         
-        runner = GameRunner(config, use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(config, use_mock_agents=True)
         runner.setup_game("custom_game")
         summary = runner.run_episode(visualize=False, verbose=False)
         
@@ -120,7 +120,7 @@ class TestSimpleGame2_CustomSettings:
     def test_custom_settings_affect_gameplay(self):
         """Test that custom settings actually affect gameplay."""
         # Run with default settings
-        runner1 = GameRunner(use_mock_agents=True, use_mock_logging=True)
+        runner1 = GameRunner(use_mock_agents=True, )
         runner1.setup_game("default_game")
         summary1 = runner1.run_episode(visualize=False, verbose=False)
         
@@ -130,7 +130,7 @@ class TestSimpleGame2_CustomSettings:
         config['regeneration_rate'] = 1.2
         config['initial_resource'] = 200
         
-        runner2 = GameRunner(config, use_mock_agents=True, use_mock_logging=True)
+        runner2 = GameRunner(config, use_mock_agents=True, )
         runner2.setup_game("custom_game")
         summary2 = runner2.run_episode(visualize=False, verbose=False)
         
@@ -145,7 +145,7 @@ class TestSimpleGame3_Tournament:
 
     def test_tournament_setup(self):
         """Test that tournament can be set up."""
-        runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(use_mock_agents=True)
         runner.setup_game("tournament_0")
         
         assert runner.env is not None
@@ -153,7 +153,7 @@ class TestSimpleGame3_Tournament:
 
     def test_tournament_runs_multiple_games(self):
         """Test that tournament runs multiple games."""
-        runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(use_mock_agents=True)
         results = []
         
         for i in range(5):
@@ -173,7 +173,7 @@ class TestSimpleGame3_Tournament:
 
     def test_tournament_aggregate_stats(self):
         """Test tournament aggregate statistics."""
-        runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(use_mock_agents=True)
         results = []
         
         for i in range(5):
@@ -195,7 +195,7 @@ class TestSimpleGame3_Tournament:
 
     def test_tournament_consistency(self):
         """Test that tournament games are consistent."""
-        runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(use_mock_agents=True)
         results = []
         
         for i in range(3):  # Smaller number for faster test
@@ -210,7 +210,7 @@ class TestSimpleGame3_Tournament:
 
     def test_run_tournament_method(self):
         """Test the run_tournament method."""
-        runner = GameRunner(use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(use_mock_agents=True)
         results = runner.run_tournament(n_games=3, verbose=False)
         
         assert len(results) == 3
@@ -369,13 +369,13 @@ class TestSimpleGamesIntegration:
     def test_all_games_use_same_config_structure(self):
         """Test that all games use consistent config structure."""
         # Basic game
-        runner1 = GameRunner(use_mock_agents=True, use_mock_logging=True)
+        runner1 = GameRunner(use_mock_agents=True, )
         runner1.setup_game("game1")
         
         # Custom game
         config = CONFIG.copy()
         config['max_steps'] = 20
-        runner2 = GameRunner(config, use_mock_agents=True, use_mock_logging=True)
+        runner2 = GameRunner(config, use_mock_agents=True, )
         runner2.setup_game("game2")
         
         # Direct environment
@@ -389,14 +389,14 @@ class TestSimpleGamesIntegration:
     def test_all_games_produce_valid_summaries(self):
         """Test that all game types produce valid summaries."""
         # GameRunner basic
-        runner1 = GameRunner(use_mock_agents=True, use_mock_logging=True)
+        runner1 = GameRunner(use_mock_agents=True, )
         runner1.setup_game("test1")
         summary1 = runner1.run_episode(visualize=False, verbose=False)
         
         # GameRunner custom
         config = CONFIG.copy()
         config['max_steps'] = 10
-        runner2 = GameRunner(config, use_mock_agents=True, use_mock_logging=True)
+        runner2 = GameRunner(config, use_mock_agents=True, )
         runner2.setup_game("test2")
         summary2 = runner2.run_episode(visualize=False, verbose=False)
         

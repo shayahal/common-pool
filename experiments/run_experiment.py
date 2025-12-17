@@ -42,7 +42,7 @@ def experiment_persona_comparison(n_games: int = 5):
         config["player_personas"] = [persona_0, persona_1]
         config["max_steps"] = 50
 
-        runner = GameRunner(config, use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(config, use_mock_agents=True)
 
         matchup_results = []
         for i in range(n_games):
@@ -99,7 +99,7 @@ def experiment_regeneration_rate(rates: list = None):
         config["regeneration_rate"] = rate
         config["max_steps"] = 50
 
-        runner = GameRunner(config, use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(config, use_mock_agents=True)
         runner.setup_game(f"regen_rate_{rate}")
         summary = runner.run_episode(visualize=False, verbose=False)
 
@@ -145,7 +145,7 @@ def experiment_player_count(n_players_list: list = None):
         # Extend personas
         config["player_personas"] = ["cooperative"] * n_players
 
-        runner = GameRunner(config, use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(config, use_mock_agents=True)
         runner.setup_game(f"n_players_{n_players}")
         summary = runner.run_episode(visualize=False, verbose=False)
 
@@ -188,7 +188,7 @@ def experiment_sustainability_threshold(thresholds: list = None):
         config["sustainability_threshold"] = threshold
         config["max_steps"] = 50
 
-        runner = GameRunner(config, use_mock_agents=True, use_mock_logging=True)
+        runner = GameRunner(config, use_mock_agents=True)
         runner.setup_game(f"threshold_{threshold}")
         summary = runner.run_episode(visualize=False, verbose=False)
 
@@ -225,7 +225,7 @@ def experiment_null_personas(n_games: int = 5, n_players: int = 2):
     config["player_personas"] = [""] * n_players  # Empty string = null persona
     config["max_steps"] = 50
 
-    runner = GameRunner(config, use_mock_agents=True, use_mock_logging=True)
+    runner = GameRunner(config, use_mock_agents=True, )
 
     results = []
     for i in range(n_games):

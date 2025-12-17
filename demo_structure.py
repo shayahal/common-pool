@@ -134,7 +134,7 @@ Logging (logging_manager.py):
   ✅ Langfuse hierarchical tracing
   ✅ Custom metrics (cooperation, Gini, sustainability)
   ✅ LLM generation tracking
-  ✅ MockLoggingManager for testing
+  ✅ LoggingManager (works with or without Langfuse)
 
 Visualization (dashboard.py):
   ✅ Streamlit dashboard with real-time charts

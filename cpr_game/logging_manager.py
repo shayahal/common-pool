@@ -7,13 +7,51 @@ with custom metrics for research analysis.
 from typing import Dict, List, Optional, Any
 import time
 import logging
+import sys
+import io
+from contextlib import redirect_stderr
 from datetime import datetime
+from packaging import version
+import importlib.metadata
+
 from langfuse import Langfuse
 
 from .config import CONFIG
 from .logger_setup import get_logger
 
 logger = get_logger(__name__)
+
+# Suppress Langfuse context warnings about missing spans
+# These are expected when logging at trace level without round spans
+langfuse_logger = logging.getLogger("langfuse")
+langfuse_logger.setLevel(logging.ERROR)  # Only show errors, suppress warnings about span context
+
+# Also suppress langfuse.decorators logger if it exists
+decorators_logger = logging.getLogger("langfuse.decorators")
+decorators_logger.setLevel(logging.ERROR)
+
+# Required Langfuse version - must match exactly
+REQUIRED_LANGFUSE_VERSION = "3.11.0"
+
+# Check Langfuse version at import time
+try:
+    installed_version = importlib.metadata.version("langfuse")
+    if version.parse(installed_version) != version.parse(REQUIRED_LANGFUSE_VERSION):
+        raise RuntimeError(
+            f"Incompatible langfuse version: {installed_version}. "
+            f"Required version: {REQUIRED_LANGFUSE_VERSION}. "
+            f"Please install the correct version: pip install langfuse=={REQUIRED_LANGFUSE_VERSION}"
+        )
+except importlib.metadata.PackageNotFoundError:
+    raise RuntimeError(
+        f"langfuse package is not installed. "
+        f"Please install: pip install langfuse=={REQUIRED_LANGFUSE_VERSION}"
+    )
+except Exception as e:
+    raise RuntimeError(
+        f"Error checking langfuse version: {e}. "
+        f"Please ensure langfuse=={REQUIRED_LANGFUSE_VERSION} is installed: pip install langfuse=={REQUIRED_LANGFUSE_VERSION}"
+    ) from e
 
 
 class LoggingManager:
@@ -40,40 +78,49 @@ class LoggingManager:
         """
         self.config = config if config is not None else CONFIG
         
-        # Initialize Langfuse client only if enabled and keys are provided
+        # Initialize client as None - will be set below if initialization succeeds
         self.client = None
-        if self.config.get("langfuse_enabled", False):
-            try:
-                public_key = self.config.get("langfuse_public_key", "")
-                secret_key = self.config.get("langfuse_secret_key", "")
-                if public_key and secret_key:
-                    self.client = Langfuse(
-                        public_key=public_key,
-                        secret_key=secret_key,
-                        host=self.config.get("langfuse_host", "https://cloud.langfuse.com")
-                    )
-                    # Verify client has trace method (for API compatibility)
-                    if not hasattr(self.client, 'trace'):
-                        logger.warning("Langfuse client does not have 'trace' method. Disabling Langfuse logging.")
-                        self.client = None
-            except (ValueError, AttributeError, ConnectionError) as e:
-                logger.warning(f"Failed to initialize Langfuse client: {e}. Disabling Langfuse logging.")
-                self.client = None
-            except Exception as e:
-                # Catch any other unexpected exceptions during initialization
-                logger.warning(f"Unexpected error initializing Langfuse client: {e}. Disabling Langfuse logging.")
-                self.client = None
+        
+        # Langfuse is required - initialize client and raise error if it fails
+        public_key = self.config.get("langfuse_public_key", "")
+        secret_key = self.config.get("langfuse_secret_key", "")
+        
+        if not public_key or not secret_key:
+            raise ValueError(
+                "Langfuse API keys are required. Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY environment variables, "
+                "or provide langfuse_public_key and langfuse_secret_key in config."
+            )
+        
+        try:
+            self.client = Langfuse(
+                public_key=public_key,
+                secret_key=secret_key,
+                host=self.config.get("langfuse_host", "https://cloud.langfuse.com")
+            )
+            # Note: We don't check for methods here - if they don't exist,
+            # they'll raise AttributeError when we try to use them, which we handle below
+        except (ValueError, AttributeError, ConnectionError) as e:
+            raise RuntimeError(
+                f"Failed to initialize Langfuse client: {e}. "
+                "Please check your Langfuse API keys and network connection."
+            ) from e
+        except Exception as e:
+            raise RuntimeError(
+                f"Unexpected error initializing Langfuse client: {e}. "
+                "Please check your Langfuse configuration."
+            ) from e
 
         # Current trace and span tracking
-        self.current_trace = None
-        self.current_round_span = None
+        # In Langfuse 3.x, we track trace/span IDs, not objects
+        self.current_trace_id = None
+        self.current_round_span_id = None
         self.game_id = None
 
         # Metrics accumulation
         self.round_metrics: List[Dict] = []
         self.generation_data: List[Dict] = []
 
-    def start_game_trace(self, game_id: str, config: Dict) -> Optional[Any]:
+    def start_game_trace(self, game_id: str, config: Dict) -> Any:
         """Initialize top-level trace for a game.
 
         Args:
@@ -81,15 +128,21 @@ class LoggingManager:
             config: Game configuration
 
         Returns:
-            Trace object or None if disabled
+            Trace object
+
+        Raises:
+            RuntimeError: If Langfuse client is not initialized
         """
         if not self.client:
-            return None
+            raise RuntimeError("Langfuse client is not initialized. Cannot start game trace.")
 
         self.game_id = game_id
 
         try:
-            self.current_trace = self.client.trace(
+            # Langfuse 3.x API: Use start_as_current_observation with as_type="trace" to create a trace
+            # Note: tags parameter is not supported in Langfuse 3.11.0, so we include tags in metadata instead
+            trace_observation = self.client.start_as_current_observation(
+                as_type="trace",
                 name=f"CPR_Game_{game_id}",
                 metadata={
                     "game_id": game_id,
@@ -98,19 +151,32 @@ class LoggingManager:
                     "max_steps": config["max_steps"],
                     "personas": config["player_personas"][:config["n_players"]],
                     "llm_model": config["llm_model"],
-                },
-                tags=["cpr_game", "multi_agent", "llm"]
+                    "tags": ["cpr_game", "multi_agent", "llm"],  # Store tags in metadata
+                }
             )
-            return self.current_trace
+            # Store trace ID for reference
+            # get_current_trace_id() might return None if trace isn't ready yet
+            trace_id = self.client.get_current_trace_id()
+            if trace_id is None:
+                # If we can't get trace ID immediately, we'll still allow logging
+                # The trace was created, so we mark it as started
+                # Use a placeholder to indicate trace is active
+                self.current_trace_id = "active"
+            else:
+                self.current_trace_id = trace_id
+            return trace_observation
         except (AttributeError, ValueError, ConnectionError) as e:
             logger.error(f"Error starting game trace: {e}", exc_info=True)
-            return None
+            raise RuntimeError(f"Failed to start game trace: {e}") from e
+        except Exception as e:
+            logger.error(f"Unexpected error starting game trace: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error starting game trace: {e}") from e
         except Exception as e:
             # Catch any other unexpected exceptions
             logger.error(f"Unexpected error starting game trace: {e}", exc_info=True)
-            return None
+            raise RuntimeError(f"Unexpected error starting game trace: {e}") from e
 
-    def start_round_span(self, round_num: int, game_state: Dict) -> Optional[Any]:
+    def start_round_span(self, round_num: int, game_state: Dict) -> Any:
         """Start a span for a single round.
 
         Args:
@@ -118,13 +184,19 @@ class LoggingManager:
             game_state: Current game state
 
         Returns:
-            Span object or None if disabled
+            Span object
+
+        Raises:
+            RuntimeError: If Langfuse client or trace is not initialized
         """
-        if not self.client or self.current_trace is None:
-            return None
+        if not self.client:
+            raise RuntimeError("Langfuse client is not initialized. Cannot start round span.")
+        if self.current_trace_id is None:
+            raise RuntimeError("Game trace is not started. Call start_game_trace() first.")
 
         try:
-            self.current_round_span = self.current_trace.span(
+            # Langfuse 3.x API: Use start_as_current_span to create a span
+            span_observation = self.client.start_as_current_span(
                 name=f"round_{round_num}",
                 metadata={
                     "round": round_num,
@@ -132,14 +204,16 @@ class LoggingManager:
                     "step": game_state.get("step", 0),
                 }
             )
-            return self.current_round_span
+            # Store span ID for reference
+            self.current_round_span_id = self.client.get_current_observation_id()
+            return span_observation
         except (AttributeError, ValueError, ConnectionError) as e:
             logger.error(f"Error starting round span: {e}", exc_info=True)
-            return None
+            raise RuntimeError(f"Failed to start round span: {e}") from e
         except Exception as e:
             # Catch any other unexpected exceptions
             logger.error(f"Unexpected error starting round span: {e}", exc_info=True)
-            return None
+            raise RuntimeError(f"Unexpected error starting round span: {e}") from e
 
     def log_generation(
         self,
@@ -160,8 +234,10 @@ class LoggingManager:
             reasoning: Extracted reasoning text
             metadata: Additional metadata
         """
-        if not self.client or self.current_trace is None:
-            return
+        if not self.client:
+            raise RuntimeError("Langfuse client is not initialized. Cannot log generation.")
+        if self.current_trace_id is None:
+            raise RuntimeError("Game trace is not started. Call start_game_trace() first.")
 
         try:
             generation_metadata = {
@@ -173,14 +249,29 @@ class LoggingManager:
             if metadata:
                 generation_metadata.update(metadata)
 
-            # Log as generation
-            self.current_trace.generation(
-                name=f"player_{player_id}_decision",
-                model=self.config["llm_model"],
-                input=prompt if self.config["log_llm_prompts"] else "[prompt hidden]",
-                output=response if self.config["log_llm_responses"] else "[response hidden]",
-                metadata=generation_metadata,
-            )
+            # Langfuse 3.x API: Use start_generation to log a generation
+            # Note: This may log warnings if no active span context exists, but that's okay
+            # Generations will be logged at the trace level instead
+            # Suppress stderr warnings about missing span context
+            stderr_buffer = io.StringIO()
+            try:
+                with redirect_stderr(stderr_buffer):
+                    self.client.start_generation(
+                        name=f"player_{player_id}_decision",
+                        model=self.config["llm_model"],
+                        input=prompt if self.config["log_llm_prompts"] else "[prompt hidden]",
+                        output=response if self.config["log_llm_responses"] else "[response hidden]",
+                        metadata=generation_metadata,
+                    )
+            except (RuntimeError, AttributeError, ValueError) as gen_error:
+                # If generation fails due to span context issues, log warning but continue
+                error_msg = str(gen_error).lower()
+                if "no active span" in error_msg or "active span" in error_msg or "span context" in error_msg:
+                    logger.warning(f"Generation logged at trace level (no active span): {gen_error}")
+                    # Generation will be logged at trace level automatically by Langfuse
+                else:
+                    # Re-raise if it's a different error
+                    raise
 
             # Store for later analysis
             self.generation_data.append({
@@ -193,9 +284,11 @@ class LoggingManager:
 
         except (AttributeError, ValueError, ConnectionError) as e:
             logger.error(f"Error logging generation: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to log generation: {e}") from e
         except Exception as e:
             # Catch any other unexpected exceptions
             logger.error(f"Unexpected error logging generation: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error logging generation: {e}") from e
 
     def log_round_metrics(self, round_num: int, metrics: Dict):
         """Log metrics for a completed round.
@@ -204,17 +297,45 @@ class LoggingManager:
             round_num: Round number
             metrics: Dictionary of metric values
         """
-        if not self.client or self.current_trace is None:
-            return
+        if not self.client:
+            raise RuntimeError("Langfuse client is not initialized. Cannot log round metrics.")
+        if self.current_trace_id is None:
+            raise RuntimeError("Game trace is not started. Call start_game_trace() first.")
 
         try:
-            # Log as scores on the current trace
+            # Langfuse 3.x API: Use score_current_trace if no span is active,
+            # otherwise use score_current_span
+            # Note: game_runner doesn't call start_round_span, so we score at trace level
             for metric_name, value in metrics.items():
                 if isinstance(value, (int, float)):
-                    self.current_trace.score(
-                        name=f"round_{round_num}_{metric_name}",
-                        value=float(value)
-                    )
+                    # If no span is active, score at trace level
+                    if self.current_round_span_id is None:
+                        self.client.score_current_trace(
+                            name=f"round_{round_num}_{metric_name}",
+                            value=float(value)
+                        )
+                    else:
+                        # Try to score at span level, but fall back to trace if no active span context
+                        # Suppress stderr warnings about missing span context
+                        stderr_buffer = io.StringIO()
+                        try:
+                            with redirect_stderr(stderr_buffer):
+                                self.client.score_current_span(
+                                    name=f"round_{round_num}_{metric_name}",
+                                    value=float(value)
+                                )
+                        except (RuntimeError, AttributeError, ValueError) as span_error:
+                            # If span context is not active, fall back to trace level
+                            error_msg = str(span_error).lower()
+                            if "no active span" in error_msg or "active span" in error_msg:
+                                logger.warning(f"No active span context, falling back to trace level scoring: {span_error}")
+                                self.client.score_current_trace(
+                                    name=f"round_{round_num}_{metric_name}",
+                                    value=float(value)
+                                )
+                            else:
+                                # Re-raise if it's a different error
+                                raise
 
             # Store for aggregation
             metrics["round"] = round_num
@@ -222,18 +343,27 @@ class LoggingManager:
 
         except (AttributeError, ValueError, ConnectionError) as e:
             logger.error(f"Error logging round metrics: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to log round metrics: {e}") from e
         except Exception as e:
             # Catch any other unexpected exceptions
             logger.error(f"Unexpected error logging round metrics: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error logging round metrics: {e}") from e
 
     def end_round_span(self):
-        """End the current round span."""
-        if not self.client or self.current_round_span is None:
-            return
+        """End the current round span.
+        
+        Raises:
+            RuntimeError: If Langfuse client or round span is not initialized
+        """
+        if not self.client:
+            raise RuntimeError("Langfuse client is not initialized. Cannot end round span.")
+        if self.current_round_span_id is None:
+            raise RuntimeError("Round span is not started. Call start_round_span() first.")
 
         try:
-            # Span automatically ends when context exits
-            self.current_round_span = None
+            # Langfuse 3.x API: Span ends automatically when context exits
+            # Just clear our reference
+            self.current_round_span_id = None
         except Exception as e:
             logger.error(f"Error ending round span: {e}", exc_info=True)
 
@@ -243,8 +373,10 @@ class LoggingManager:
         Args:
             summary: Game summary statistics
         """
-        if not self.client or self.current_trace is None:
-            return
+        if not self.client:
+            raise RuntimeError("Langfuse client is not initialized. Cannot end game trace.")
+        if self.current_trace_id is None:
+            raise RuntimeError("Game trace is not started. Call start_game_trace() first.")
 
         try:
             # Log game-level scores
@@ -258,20 +390,23 @@ class LoggingManager:
                 "payoff_fairness": 1.0 - summary.get("gini_coefficient", 0),
             }
 
+            # Langfuse 3.x API: Use score_current_trace to log game-level scores
             for score_name, value in game_scores.items():
                 if isinstance(value, (int, float)):
-                    self.current_trace.score(
+                    self.client.score_current_trace(
                         name=score_name,
                         value=float(value)
                     )
 
-            # Add summary metadata
-            self.current_trace.update(
-                metadata={
-                    **self.current_trace.metadata,
-                    "summary": summary,
-                    "end_time": datetime.now().isoformat(),
-                }
+            # Langfuse 3.x API: Use update_current_trace to add summary metadata
+            current_metadata = {
+                "game_id": self.game_id,
+                "timestamp": datetime.now().isoformat(),
+                "summary": summary,
+                "end_time": datetime.now().isoformat(),
+            }
+            self.client.update_current_trace(
+                metadata=current_metadata
             )
 
             # Flush to Langfuse
@@ -280,11 +415,13 @@ class LoggingManager:
 
         except (AttributeError, ValueError, ConnectionError) as e:
             logger.error(f"Error ending game trace: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to end game trace: {e}") from e
         except Exception as e:
             # Catch any other unexpected exceptions
             logger.error(f"Unexpected error ending game trace: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected error ending game trace: {e}") from e
         finally:
-            self.current_trace = None
+            self.current_trace_id = None
             self.game_id = None
 
     def get_round_metrics(self) -> List[Dict]:
@@ -305,15 +442,15 @@ class LoggingManager:
 
     def reset(self):
         """Reset manager state for new game."""
-        self.current_trace = None
-        self.current_round_span = None
+        self.current_trace_id = None
+        self.current_round_span_id = None
         self.game_id = None
         self.round_metrics = []
         self.generation_data = []
 
     def __del__(self):
         """Cleanup: flush any pending traces."""
-        if hasattr(self, 'client') and self.client:
+        if self.client:
             try:
                 self.client.flush()
             except Exception as e:
