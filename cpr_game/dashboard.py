@@ -231,7 +231,11 @@ class Dashboard:
         # Bar chart race for cumulative payoffs (full width) - ALWAYS FIRST IN GUI
         # Render this BEFORE header to ensure it's the first visual element
         if len(self.payoff_history) > 0:
-            self._render_bar_chart_race(container=self._chart_containers.get("bar_race") if self._chart_containers else None)
+            current_step = game_state.get("step", 0)
+            self._render_bar_chart_race(
+                container=self._chart_containers.get("bar_race") if self._chart_containers else None,
+                step=current_step
+            )
 
         # Header metrics - render in container to replace instead of append
         header_container = self._chart_containers.get("header") if self._chart_containers else None
@@ -243,20 +247,32 @@ class Dashboard:
             self._render_header(game_state)
         
         if len(self.resource_history) > 0:
+            # Get current step for unique keys
+            current_step = game_state.get("step", 0)
+            
             # Organize charts in columns for better layout
             # Columns structure is stable, chart content updates via containers
             col1, col2 = st.columns(2)
             
             with col1:
                 if self.config["plots"]["resource_over_time"]:
-                    self._render_resource_chart(container=self._chart_containers.get("resource") if self._chart_containers else None)
+                    self._render_resource_chart(
+                        container=self._chart_containers.get("resource") if self._chart_containers else None,
+                        step=current_step
+                    )
 
                 if self.config["plots"]["cooperation_index"] and len(self.cooperation_history) > 0:
-                    self._render_cooperation_chart(container=self._chart_containers.get("cooperation") if self._chart_containers else None)
+                    self._render_cooperation_chart(
+                        container=self._chart_containers.get("cooperation") if self._chart_containers else None,
+                        step=current_step
+                    )
 
             with col2:
                 if self.config["plots"]["individual_extractions"] and len(self.extraction_history) > 0:
-                    self._render_extraction_chart(container=self._chart_containers.get("extraction") if self._chart_containers else None)
+                    self._render_extraction_chart(
+                        container=self._chart_containers.get("extraction") if self._chart_containers else None,
+                        step=current_step
+                    )
 
         # Only show summary and tabs when game is done
         if game_state.get("done", False):
@@ -353,11 +369,12 @@ class Dashboard:
 
         st.divider()
 
-    def _render_resource_chart(self, container=None):
+    def _render_resource_chart(self, container=None, step=0):
         """Render resource over time chart.
         
         Args:
             container: Optional Streamlit container to render into. If None, renders directly.
+            step: Current step number to make keys unique per update.
         """
         if len(self.resource_history) == 0:
             if container:
@@ -399,16 +416,19 @@ class Dashboard:
         )
 
         # Use container if provided, otherwise render directly (for backward compatibility)
+        # Note: Include step in key to make it unique per update call
+        chart_key = f"{self.dashboard_id}_resource_chart_{step}"
         if container:
-            container.plotly_chart(fig, width='stretch')
+            container.plotly_chart(fig, width='stretch', key=chart_key)
         else:
-            st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_resource_chart")
+            st.plotly_chart(fig, width='stretch', key=chart_key)
 
-    def _render_extraction_chart(self, container=None):
+    def _render_extraction_chart(self, container=None, step=0):
         """Render player extractions over time.
         
         Args:
             container: Optional Streamlit container to render into. If None, renders directly.
+            step: Current step number to make keys unique per update.
         """
         if len(self.extraction_history) == 0:
             if container:
@@ -444,10 +464,12 @@ class Dashboard:
         )
 
         # Use container if provided, otherwise render directly (for backward compatibility)
+        # Note: Include step in key to make it unique per update call
+        chart_key = f"{self.dashboard_id}_extraction_chart_{step}"
         if container:
-            container.plotly_chart(fig, width='stretch')
+            container.plotly_chart(fig, width='stretch', key=chart_key)
         else:
-            st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_extraction_chart")
+            st.plotly_chart(fig, width='stretch', key=chart_key)
 
     def _render_payoff_chart(self, container=None):
         """Render cumulative payoffs as a bar chart showing final summary.
@@ -495,16 +517,19 @@ class Dashboard:
         )
 
         # Use container if provided, otherwise render directly (for backward compatibility)
+        # Note: Keys are required even in containers to prevent duplicate ID errors
+        chart_key = f"{self.dashboard_id}_payoff_chart"
         if container:
-            container.plotly_chart(fig, width='stretch')
+            container.plotly_chart(fig, width='stretch', key=chart_key)
         else:
-            st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_payoff_chart")
+            st.plotly_chart(fig, width='stretch', key=chart_key)
 
-    def _render_cooperation_chart(self, container=None):
+    def _render_cooperation_chart(self, container=None, step=0):
         """Render cooperation index over time.
         
         Args:
             container: Optional Streamlit container to render into. If None, renders directly.
+            step: Current step number to make keys unique per update.
         """
         if len(self.cooperation_history) == 0:
             if container:
@@ -537,10 +562,12 @@ class Dashboard:
         )
 
         # Use container if provided, otherwise render directly (for backward compatibility)
+        # Note: Include step in key to make it unique per update call
+        chart_key = f"{self.dashboard_id}_cooperation_chart_{step}"
         if container:
-            container.plotly_chart(fig, width='stretch')
+            container.plotly_chart(fig, width='stretch', key=chart_key)
         else:
-            st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_cooperation_chart")
+            st.plotly_chart(fig, width='stretch', key=chart_key)
 
     def _render_reasoning_log(self):
         """Render LLM reasoning log."""
@@ -814,11 +841,12 @@ class Dashboard:
             "cumulative_payoffs": cumulative_payoffs,
         }
     
-    def _render_bar_chart_race(self, container=None):
+    def _render_bar_chart_race(self, container=None, step=0):
         """Render animated bar chart race showing cumulative payoffs over time.
         
         Args:
             container: Optional Streamlit container to render into. If None, renders directly.
+            step: Current step number to make keys unique per update.
         """
         if len(self.payoff_history) == 0:
             if container:
@@ -934,10 +962,12 @@ class Dashboard:
         
         # Use container if provided, otherwise render directly
         # ALWAYS use 100% width
+        # Note: Include step in key to make it unique per update call
+        chart_key = f"{self.dashboard_id}_bar_race_{step}"
         if container:
-            container.plotly_chart(fig, width='stretch')
+            container.plotly_chart(fig, width='stretch', key=chart_key)
         else:
-            st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_bar_race")
+            st.plotly_chart(fig, width='stretch', key=chart_key)
     
     def show_summary(self, summary: Dict):
         """Display game summary statistics.

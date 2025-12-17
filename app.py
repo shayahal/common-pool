@@ -446,7 +446,8 @@ def _display_run_data(run_data: dict):
         }
         
         # Bar chart race - ALWAYS FIRST AND ON TOP
-        temp_dashboard._render_bar_chart_race()
+        # Use step 0 for static display (game is already done)
+        temp_dashboard._render_bar_chart_race(step=0)
         
         # Render charts
         col1, col2 = st.columns(2)
