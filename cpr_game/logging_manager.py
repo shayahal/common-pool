@@ -127,6 +127,7 @@ class LoggingManager:
         self.current_trace_id = None
         self.current_round_span_id = None
         self.current_game_span = None  # Track the main game span
+        self.current_trace_context = None  # Track trace context for linking observations
         self.game_id = None
 
         # Metrics accumulation
@@ -185,6 +186,13 @@ class LoggingManager:
                 else:
                     logger.warning("Could not get trace ID from span")
                     self.current_trace_id = "active"
+
+            # Get the trace context for linking child observations
+            if hasattr(trace_span, 'trace_context'):
+                self.current_trace_context = trace_span.trace_context
+                logger.info(f"✓ Trace context captured")
+            else:
+                logger.warning("Could not get trace context from span")
 
             # Store the span so we can end it later
             self.current_game_span = trace_span
@@ -297,7 +305,7 @@ class LoggingManager:
                 "output": response if self.config["log_llm_responses"] else "[response hidden]",
                 "metadata": generation_metadata,
             }
-            
+
             # Add token usage if available
             # Langfuse 3.x tracks token usage - try multiple approaches for compatibility
             if api_metrics:
@@ -337,8 +345,14 @@ class LoggingManager:
             
             try:
                 with redirect_stderr(stderr_buffer):
-                    # Log generation to Langfuse using start_observation
-                    generation_result = self.client.start_observation(**generation_params)
+                    # Log generation to Langfuse using the span's start_observation method
+                    # This automatically links it as a child of the game span
+                    if self.current_game_span:
+                        generation_result = self.current_game_span.start_observation(**generation_params)
+                    else:
+                        # Fallback to client method if no active span (shouldn't happen)
+                        logger.warning("No active game span, using client.start_observation")
+                        generation_result = self.client.start_observation(**generation_params)
                     
                     # If we have token usage and the generation was created, try to update it
                     # Some Langfuse versions require updating the generation after creation
@@ -570,6 +584,7 @@ class LoggingManager:
         finally:
             self.current_trace_id = None
             self.current_game_span = None
+            self.current_trace_context = None
             self.game_id = None
 
     def get_round_metrics(self) -> List[Dict]:
@@ -601,6 +616,7 @@ class LoggingManager:
         self.current_trace_id = None
         self.current_round_span_id = None
         self.current_game_span = None
+        self.current_trace_context = None
         self.game_id = None
         self.round_metrics = []
         self.generation_data = []
