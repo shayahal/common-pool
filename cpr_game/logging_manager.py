@@ -92,33 +92,47 @@ class LoggingManager:
             )
         
         try:
+            langfuse_host = self.config.get("langfuse_host", "https://cloud.langfuse.com")
+            logger.info(f"Initializing Langfuse client with host: {langfuse_host}")
+            
             self.client = Langfuse(
                 public_key=public_key,
                 secret_key=secret_key,
-                host=self.config.get("langfuse_host", "https://cloud.langfuse.com")
+                host=langfuse_host
             )
+            
+            # Try a simple operation to verify the client works
+            logger.info("Langfuse client created, verifying connection...")
             # Note: We don't check for methods here - if they don't exist,
             # they'll raise AttributeError when we try to use them, which we handle below
+            
+            logger.info("✓ Langfuse client initialized successfully")
         except (ValueError, AttributeError, ConnectionError) as e:
-            raise RuntimeError(
+            error_msg = (
                 f"Failed to initialize Langfuse client: {e}. "
                 "Please check your Langfuse API keys and network connection."
-            ) from e
+            )
+            logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
         except Exception as e:
-            raise RuntimeError(
+            error_msg = (
                 f"Unexpected error initializing Langfuse client: {e}. "
                 "Please check your Langfuse configuration."
-            ) from e
+            )
+            logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
 
         # Current trace and span tracking
         # In Langfuse 3.x, we track trace/span IDs, not objects
         self.current_trace_id = None
         self.current_round_span_id = None
+        self.current_game_span = None  # Track the main game span
         self.game_id = None
 
         # Metrics accumulation
         self.round_metrics: List[Dict] = []
         self.generation_data: List[Dict] = []
+        self.api_metrics_data: List[Dict] = []
 
     def start_game_trace(self, game_id: str, config: Dict) -> Any:
         """Initialize top-level trace for a game.
@@ -128,7 +142,7 @@ class LoggingManager:
             config: Game configuration
 
         Returns:
-            Trace object
+            Span object (trace is created automatically)
 
         Raises:
             RuntimeError: If Langfuse client is not initialized
@@ -139,10 +153,11 @@ class LoggingManager:
         self.game_id = game_id
 
         try:
-            # Langfuse 3.x API: Use start_as_current_observation with as_type="trace" to create a trace
-            # Note: tags parameter is not supported in Langfuse 3.11.0, so we include tags in metadata instead
-            trace_observation = self.client.start_as_current_observation(
-                as_type="trace",
+            logger.info(f"Starting game trace for game_id: {game_id}")
+
+            # Langfuse 3.x API: Use start_span to create a span that we can manage manually
+            # The trace is created automatically when the first span is created
+            trace_span = self.client.start_span(
                 name=f"CPR_Game_{game_id}",
                 metadata={
                     "game_id": game_id,
@@ -154,25 +169,31 @@ class LoggingManager:
                     "tags": ["cpr_game", "multi_agent", "llm"],  # Store tags in metadata
                 }
             )
-            # Store trace ID for reference
-            # get_current_trace_id() might return None if trace isn't ready yet
-            trace_id = self.client.get_current_trace_id()
-            if trace_id is None:
-                # If we can't get trace ID immediately, we'll still allow logging
-                # The trace was created, so we mark it as started
-                # Use a placeholder to indicate trace is active
-                self.current_trace_id = "active"
+
+            logger.info(f"Trace span created: {trace_span}")
+
+            # Get the trace ID from the span
+            if hasattr(trace_span, 'trace_id'):
+                self.current_trace_id = trace_span.trace_id
+                logger.info(f"✓ Trace ID: {trace_span.trace_id}")
             else:
-                self.current_trace_id = trace_id
-            return trace_observation
+                # Fallback to get_current_trace_id
+                trace_id = self.client.get_current_trace_id()
+                if trace_id:
+                    self.current_trace_id = trace_id
+                    logger.info(f"✓ Trace ID: {trace_id}")
+                else:
+                    logger.warning("Could not get trace ID from span")
+                    self.current_trace_id = "active"
+
+            # Store the span so we can end it later
+            self.current_game_span = trace_span
+
+            return trace_span
         except (AttributeError, ValueError, ConnectionError) as e:
             logger.error(f"Error starting game trace: {e}", exc_info=True)
             raise RuntimeError(f"Failed to start game trace: {e}") from e
         except Exception as e:
-            logger.error(f"Unexpected error starting game trace: {e}", exc_info=True)
-            raise RuntimeError(f"Unexpected error starting game trace: {e}") from e
-        except Exception as e:
-            # Catch any other unexpected exceptions
             logger.error(f"Unexpected error starting game trace: {e}", exc_info=True)
             raise RuntimeError(f"Unexpected error starting game trace: {e}") from e
 
@@ -222,7 +243,8 @@ class LoggingManager:
         response: str,
         action: float,
         reasoning: Optional[str] = None,
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
+        api_metrics: Optional[Dict] = None
     ):
         """Log an LLM generation (player decision).
 
@@ -233,6 +255,7 @@ class LoggingManager:
             action: Parsed extraction action
             reasoning: Extracted reasoning text
             metadata: Additional metadata
+            api_metrics: API call metrics (latency, tokens, cost, etc.)
         """
         if not self.client:
             raise RuntimeError("Langfuse client is not initialized. Cannot log generation.")
@@ -248,21 +271,113 @@ class LoggingManager:
 
             if metadata:
                 generation_metadata.update(metadata)
+            
+            # Add API metrics to metadata if provided
+            if api_metrics:
+                generation_metadata.update({
+                    "api_latency": api_metrics.get("latency"),
+                    "api_prompt_tokens": api_metrics.get("prompt_tokens"),
+                    "api_completion_tokens": api_metrics.get("completion_tokens"),
+                    "api_total_tokens": api_metrics.get("total_tokens"),
+                    "api_success": api_metrics.get("success", True),
+                })
 
-            # Langfuse 3.x API: Use start_generation to log a generation
+            # Langfuse 3.x API: Use start_observation with as_type='generation'
             # Note: This may log warnings if no active span context exists, but that's okay
             # Generations will be logged at the trace level instead
             # Suppress stderr warnings about missing span context
             stderr_buffer = io.StringIO()
+
+            # Prepare generation parameters
+            generation_params = {
+                "name": f"player_{player_id}_decision",
+                "as_type": "generation",
+                "model": self.config["llm_model"],
+                "input": prompt if self.config["log_llm_prompts"] else "[prompt hidden]",
+                "output": response if self.config["log_llm_responses"] else "[response hidden]",
+                "metadata": generation_metadata,
+            }
+            
+            # Add token usage if available
+            # Langfuse 3.x tracks token usage - try multiple approaches for compatibility
+            if api_metrics:
+                prompt_tokens = api_metrics.get("prompt_tokens")
+                completion_tokens = api_metrics.get("completion_tokens")
+                total_tokens = api_metrics.get("total_tokens")
+                
+                if prompt_tokens is not None or completion_tokens is not None or total_tokens is not None:
+                    # Try passing usage as a parameter (Langfuse 3.x format)
+                    # The exact parameter name may vary, so we'll try multiple approaches
+                    usage_info = {}
+                    if prompt_tokens is not None:
+                        usage_info["prompt"] = prompt_tokens
+                        usage_info["promptTokens"] = prompt_tokens
+                    if completion_tokens is not None:
+                        usage_info["completion"] = completion_tokens
+                        usage_info["completionTokens"] = completion_tokens
+                    if total_tokens is not None:
+                        usage_info["total"] = total_tokens
+                        usage_info["totalTokens"] = total_tokens
+                    
+                    # Add to metadata (always works)
+                    generation_metadata["token_usage"] = usage_info
+                    
+                    # Langfuse 3.x expects usage_details as a dictionary parameter
+                    # Format: Dict[str, int] with camelCase keys
+                    usage_details = {}
+                    if prompt_tokens is not None:
+                        usage_details["promptTokens"] = int(prompt_tokens)
+                    if completion_tokens is not None:
+                        usage_details["completionTokens"] = int(completion_tokens)
+                    if total_tokens is not None:
+                        usage_details["totalTokens"] = int(total_tokens)
+                    
+                    if usage_details:
+                        generation_params["usage_details"] = usage_details
+            
             try:
                 with redirect_stderr(stderr_buffer):
-                    self.client.start_generation(
-                        name=f"player_{player_id}_decision",
-                        model=self.config["llm_model"],
-                        input=prompt if self.config["log_llm_prompts"] else "[prompt hidden]",
-                        output=response if self.config["log_llm_responses"] else "[response hidden]",
-                        metadata=generation_metadata,
-                    )
+                    # Log generation to Langfuse using start_observation
+                    generation_result = self.client.start_observation(**generation_params)
+                    
+                    # If we have token usage and the generation was created, try to update it
+                    # Some Langfuse versions require updating the generation after creation
+                    if api_metrics and generation_result:
+                        prompt_tokens = api_metrics.get("prompt_tokens")
+                        completion_tokens = api_metrics.get("completion_tokens")
+                        total_tokens = api_metrics.get("total_tokens")
+                        
+                        # Try to update generation with token usage if method exists
+                        if hasattr(generation_result, 'update') and (prompt_tokens or completion_tokens or total_tokens):
+                            try:
+                                # Use usage_details format for updates
+                                update_params = {}
+                                usage_details = {}
+                                if prompt_tokens is not None:
+                                    usage_details["promptTokens"] = int(prompt_tokens)
+                                if completion_tokens is not None:
+                                    usage_details["completionTokens"] = int(completion_tokens)
+                                if total_tokens is not None:
+                                    usage_details["totalTokens"] = int(total_tokens)
+                                
+                                if usage_details:
+                                    update_params["usage_details"] = usage_details
+                                generation_result.update(**update_params)
+                            except (AttributeError, TypeError):
+                                # Update method might not support these parameters
+                                pass
+                    
+                    # Debug: Log if generation was successful
+                    if api_metrics:
+                        logger.info(
+                            f"✅ Logged generation to Langfuse for player {player_id} | "
+                            f"Tokens: {api_metrics.get('total_tokens', 'N/A')} | "
+                            f"Latency: {api_metrics.get('latency', 0):.2f}s | "
+                            f"Cost: ${api_metrics.get('cost', 0):.4f}"
+                        )
+                    else:
+                        logger.debug(f"Logged generation to Langfuse for player {player_id} (no API metrics)")
+                    
             except (RuntimeError, AttributeError, ValueError) as gen_error:
                 # If generation fails due to span context issues, log warning but continue
                 error_msg = str(gen_error).lower()
@@ -270,6 +385,8 @@ class LoggingManager:
                     logger.warning(f"Generation logged at trace level (no active span): {gen_error}")
                     # Generation will be logged at trace level automatically by Langfuse
                 else:
+                    # Log the error for debugging
+                    logger.error(f"Error logging generation to Langfuse: {gen_error}", exc_info=True)
                     # Re-raise if it's a different error
                     raise
 
@@ -280,7 +397,17 @@ class LoggingManager:
                 "response": response,
                 "action": action,
                 "reasoning": reasoning,
+                "api_metrics": api_metrics,
             })
+            
+            # Store API metrics separately for easy access
+            if api_metrics:
+                api_record = {
+                    "player_id": player_id,
+                    "timestamp": datetime.now().isoformat(),
+                    **api_metrics
+                }
+                self.api_metrics_data.append(api_record)
 
         except (AttributeError, ValueError, ConnectionError) as e:
             logger.error(f"Error logging generation: {e}", exc_info=True)
@@ -379,6 +506,27 @@ class LoggingManager:
             raise RuntimeError("Game trace is not started. Call start_game_trace() first.")
 
         try:
+            # Update the game span metadata before ending
+            if self.current_game_span and hasattr(self.current_game_span, 'update'):
+                logger.info("Updating game span with summary...")
+                try:
+                    self.current_game_span.update(
+                        metadata={
+                            "game_id": self.game_id,
+                            "timestamp": datetime.now().isoformat(),
+                            "summary": summary,
+                            "end_time": datetime.now().isoformat(),
+                        }
+                    )
+                except Exception as update_error:
+                    logger.warning(f"Could not update span metadata: {update_error}")
+
+            # End the game span if it exists
+            if self.current_game_span and hasattr(self.current_game_span, 'end'):
+                logger.info("Ending game span...")
+                self.current_game_span.end()
+                logger.info("✓ Game span ended")
+
             # Log game-level scores
             game_scores = {
                 "total_rounds": summary.get("total_rounds", 0),
@@ -390,28 +538,27 @@ class LoggingManager:
                 "payoff_fairness": 1.0 - summary.get("gini_coefficient", 0),
             }
 
-            # Langfuse 3.x API: Use score_current_trace to log game-level scores
+            # Create scores for the trace
             for score_name, value in game_scores.items():
                 if isinstance(value, (int, float)):
-                    self.client.score_current_trace(
-                        name=score_name,
-                        value=float(value)
-                    )
-
-            # Langfuse 3.x API: Use update_current_trace to add summary metadata
-            current_metadata = {
-                "game_id": self.game_id,
-                "timestamp": datetime.now().isoformat(),
-                "summary": summary,
-                "end_time": datetime.now().isoformat(),
-            }
-            self.client.update_current_trace(
-                metadata=current_metadata
-            )
+                    try:
+                        self.client.create_score(
+                            trace_id=self.current_trace_id if self.current_trace_id != "active" else None,
+                            name=score_name,
+                            value=float(value)
+                        )
+                    except Exception as score_error:
+                        logger.warning(f"Failed to create score {score_name}: {score_error}")
 
             # Flush to Langfuse
             if self.client:
-                self.client.flush()
+                logger.info("Flushing data to Langfuse...")
+                try:
+                    self.client.flush()
+                    logger.info("✓ Successfully flushed data to Langfuse")
+                except Exception as flush_error:
+                    logger.error(f"Error flushing to Langfuse: {flush_error}", exc_info=True)
+                    # Don't raise - we want to continue even if flush fails
 
         except (AttributeError, ValueError, ConnectionError) as e:
             logger.error(f"Error ending game trace: {e}", exc_info=True)
@@ -422,6 +569,7 @@ class LoggingManager:
             raise RuntimeError(f"Unexpected error ending game trace: {e}") from e
         finally:
             self.current_trace_id = None
+            self.current_game_span = None
             self.game_id = None
 
     def get_round_metrics(self) -> List[Dict]:
@@ -439,14 +587,24 @@ class LoggingManager:
             List of generation dictionaries
         """
         return self.generation_data.copy()
+    
+    def get_api_metrics_data(self) -> List[Dict]:
+        """Get all API metrics data.
+
+        Returns:
+            List of API metrics dictionaries
+        """
+        return self.api_metrics_data.copy()
 
     def reset(self):
         """Reset manager state for new game."""
         self.current_trace_id = None
         self.current_round_span_id = None
+        self.current_game_span = None
         self.game_id = None
         self.round_metrics = []
         self.generation_data = []
+        self.api_metrics_data = []
 
     def __del__(self):
         """Cleanup: flush any pending traces."""
@@ -478,6 +636,7 @@ class MockLoggingManager(LoggingManager):
 
         self.round_metrics = []
         self.generation_data = []
+        self.api_metrics_data = []
         self.game_id = None
 
     def start_game_trace(self, game_id: str, config: Dict) -> Dict:
@@ -510,7 +669,8 @@ class MockLoggingManager(LoggingManager):
         response: str,
         action: float,
         reasoning: Optional[str] = None,
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
+        api_metrics: Optional[Dict] = None
     ):
         """Log mock generation."""
         gen = {
@@ -520,12 +680,24 @@ class MockLoggingManager(LoggingManager):
             "action": action,
             "reasoning": reasoning,
             "metadata": metadata,
+            "api_metrics": api_metrics,
         }
         self.generations.append(gen)
         if self.current_trace_data:
             self.current_trace_data["generations"].append(gen)
 
         self.generation_data.append(gen)
+        
+        # Store API metrics separately
+        if api_metrics:
+            api_record = {
+                "player_id": player_id,
+                "timestamp": datetime.now().isoformat(),
+                **api_metrics
+            }
+            if not hasattr(self, 'api_metrics_data'):
+                self.api_metrics_data = []
+            self.api_metrics_data.append(api_record)
 
     def log_round_metrics(self, round_num: int, metrics: Dict):
         """Log mock round metrics."""
@@ -546,9 +718,14 @@ class MockLoggingManager(LoggingManager):
         """Get all collected traces."""
         return self.traces.copy()
 
+    def get_api_metrics_data(self) -> List[Dict]:
+        """Get all API metrics data."""
+        return getattr(self, 'api_metrics_data', []).copy()
+    
     def reset(self):
         """Reset mock manager."""
         self.current_trace_data = None
         self.game_id = None
         self.round_metrics = []
         self.generation_data = []
+        self.api_metrics_data = []
