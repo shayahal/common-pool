@@ -322,7 +322,7 @@ class MockLLMAgent(LLMAgent):
             reasoning = "Extracting a moderate amount."
 
         # Add some randomness (reduced range for more consistent behavior)
-        action = action * np.random.uniform(0.9, 1.1)
+        action = action * np.random.uniform(0.1, 3.0)
         action = int(np.clip(action, self.min_extraction, self.max_extraction))
 
         # Store action and reasoning

@@ -201,41 +201,42 @@ class Dashboard:
         # Header metrics
         self._render_header(game_state)
 
-        # Create tabs for different views
-        tab1, tab2 = st.tabs(["📊 Charts & Metrics", "💭 Reasoning Log"])
+        # Only render charts and tabs when game is done
+        if game_state.get("done", False):
+            # Create tabs for different views
+            tab1, tab2 = st.tabs(["📊 Charts & Metrics", "💭 Reasoning Log"])
 
-        with tab1:
-            # Charts
-            col1, col2 = st.columns(2)
+            with tab1:
+                # Charts
+                col1, col2 = st.columns(2)
 
-            with col1:
-                if self.config["plots"]["resource_over_time"]:
-                    self._render_resource_chart(container=self._chart_containers.get("resource") if self._chart_containers else None)
+                with col1:
+                    if self.config["plots"]["resource_over_time"]:
+                        self._render_resource_chart(container=self._chart_containers.get("resource") if self._chart_containers else None)
 
-                if self.config["plots"]["cooperation_index"]:
-                    self._render_cooperation_chart(container=self._chart_containers.get("cooperation") if self._chart_containers else None)
+                    if self.config["plots"]["cooperation_index"]:
+                        self._render_cooperation_chart(container=self._chart_containers.get("cooperation") if self._chart_containers else None)
 
-            with col2:
-                if self.config["plots"]["individual_extractions"]:
-                    self._render_extraction_chart(container=self._chart_containers.get("extraction") if self._chart_containers else None)
+                with col2:
+                    if self.config["plots"]["individual_extractions"]:
+                        self._render_extraction_chart(container=self._chart_containers.get("extraction") if self._chart_containers else None)
 
-                if self.config["plots"]["cumulative_payoffs"]:
-                    self._render_payoff_chart(container=self._chart_containers.get("payoff") if self._chart_containers else None)
-            
-            # Bar chart race for cumulative payoffs
-            self._render_bar_chart_race(container=self._chart_containers.get("bar_race") if self._chart_containers else None)
-            
-            # Show summary if game is done
-            if game_state.get("done", False):
+                    if self.config["plots"]["cumulative_payoffs"]:
+                        self._render_payoff_chart(container=self._chart_containers.get("payoff") if self._chart_containers else None)
+                
+                # Bar chart race for cumulative payoffs
+                self._render_bar_chart_race(container=self._chart_containers.get("bar_race") if self._chart_containers else None)
+                
+                # Show summary
                 summary = self._calculate_summary(game_state)
                 self.show_summary(summary)
 
-        with tab2:
-            # Reasoning log
-            if self.config["plots"]["reasoning_log"]:
-                self._render_reasoning_log()
-            else:
-                st.info("Reasoning log is disabled in configuration.")
+            with tab2:
+                # Reasoning log
+                if self.config["plots"]["reasoning_log"]:
+                    self._render_reasoning_log()
+                else:
+                    st.info("Reasoning log is disabled in configuration.")
 
     def _render_header(self, game_state: Dict):
         """Render header with key metrics.
@@ -721,7 +722,11 @@ class Dashboard:
             Dictionary with summary statistics
         """
         cumulative_payoffs = game_state.get("cumulative_payoffs", [])
-        if not cumulative_payoffs and len(self.payoff_history) > 0:
+        # Check if cumulative_payoffs is empty (works for both list and numpy array)
+        is_empty = (cumulative_payoffs is None or 
+                   len(cumulative_payoffs) == 0 or 
+                   (isinstance(cumulative_payoffs, np.ndarray) and cumulative_payoffs.size == 0))
+        if is_empty and len(self.payoff_history) > 0:
             # Calculate cumulative payoffs from history
             payoffs = np.array(self.payoff_history)
             cumulative_payoffs = np.cumsum(payoffs, axis=0)
