@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from cpr_game.db_manager import DatabaseManager
 from cpr_game.config import CONFIG
 from cpr_game.persona_prompts import PERSONA_PROMPTS
+from main import run_experiment
 
 # Available models (common OpenAI models)
 AVAILABLE_MODELS = [
@@ -319,13 +320,20 @@ def _show_experiments_list(db_manager: DatabaseManager):
                     st.session_state[f"view_exp_{selected_exp_id}"] = True
 
             with col2:
-                if st.button("▶️ Run Experiment", use_container_width=True):
-                    st.info(
-                        f"To run this experiment, use:\n\n"
-                        f"```bash\n"
-                        f"python main.py --experiment-id {selected_exp_id}\n"
-                        f"```"
-                    )
+                # Check if experiment is already running
+                experiment_status = experiment.get("status", "pending")
+                is_running = experiment_status == "running"
+                is_completed = experiment_status == "completed"
+                
+                if is_running:
+                    st.warning("⏳ Experiment is currently running...")
+                elif is_completed:
+                    st.success("✅ Experiment completed")
+                    if st.button("🔄 Run Again", use_container_width=True, key="run_again"):
+                        st.session_state[f"run_exp_{selected_exp_id}"] = True
+                else:
+                    if st.button("▶️ Run Experiment", use_container_width=True, key="run_exp"):
+                        st.session_state[f"run_exp_{selected_exp_id}"] = True
 
             with col3:
                 if st.button("🗑️ Delete", use_container_width=True, type="secondary"):
@@ -334,6 +342,69 @@ def _show_experiments_list(db_manager: DatabaseManager):
                         st.rerun()
                     else:
                         st.error("❌ Failed to delete experiment")
+
+            # Handle experiment run
+            if st.session_state.get(f"run_exp_{selected_exp_id}", False):
+                st.session_state[f"run_exp_{selected_exp_id}"] = False
+                
+                # Run configuration
+                st.divider()
+                st.markdown("### Run Experiment Configuration")
+                
+                run_col1, run_col2 = st.columns(2)
+                with run_col1:
+                    use_mock = st.checkbox(
+                        "Use Mock Agents (No API Calls)",
+                        value=False,
+                        help="Use mock agents for testing without making API calls"
+                    )
+                with run_col2:
+                    max_workers = st.number_input(
+                        "Max Workers",
+                        min_value=1,
+                        max_value=20,
+                        value=min(10, experiment['parameters']['number_of_games']),
+                        help="Number of parallel workers for running games"
+                    )
+                
+                if st.button("🚀 Start Experiment", type="primary", use_container_width=True):
+                    # Store run parameters
+                    st.session_state[f"run_exp_config_{selected_exp_id}"] = {
+                        "use_mock": use_mock,
+                        "max_workers": max_workers
+                    }
+                    st.session_state[f"should_run_{selected_exp_id}"] = True
+                    st.rerun()
+            
+            # Execute experiment run
+            if st.session_state.get(f"should_run_{selected_exp_id}", False):
+                st.session_state[f"should_run_{selected_exp_id}"] = False
+                config = st.session_state.get(f"run_exp_config_{selected_exp_id}", {})
+                
+                st.info("🚀 Starting experiment... This may take a while. Please wait.")
+                
+                # Run experiment (this will block, but Streamlit will show it's working)
+                with st.spinner("Running experiment... This may take several minutes."):
+                    try:
+                        success = run_experiment(
+                            experiment_id=selected_exp_id,
+                            use_mock_agents=config.get("use_mock", False),
+                            max_workers=config.get("max_workers", 10)
+                        )
+                        
+                        if success:
+                            st.success("✅ Experiment completed successfully!")
+                            # Refresh experiment data
+                            experiment = db_manager.load_experiment(selected_exp_id)
+                        else:
+                            st.error("❌ Experiment failed. Check logs for details.")
+                    except Exception as e:
+                        st.error(f"❌ Error running experiment: {str(e)}")
+                        st.exception(e)
+                
+                # Clear config
+                if f"run_exp_config_{selected_exp_id}" in st.session_state:
+                    del st.session_state[f"run_exp_config_{selected_exp_id}"]
 
             # Show details if requested
             if st.session_state.get(f"view_exp_{selected_exp_id}", False):

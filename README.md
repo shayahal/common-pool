@@ -197,6 +197,43 @@ Generates:
 - Gini coefficient (payoff inequality)
 - Payoff difference between players
 
+## Logging
+
+The codebase uses a multi-tier logging system:
+
+### Log Destinations
+
+1. **`logs/cpr_game.log`** - Main application log
+   - All Python logger calls (logger.info(), logger.error(), etc.)
+   - DEBUG level and above
+   - Text format with timestamps
+
+2. **`logs/api_calls.log`** - API call metrics
+   - LLM API call details (tokens, latency, cost, errors)
+   - JSON format (one line per API call)
+   - Useful for cost analysis and debugging API issues
+
+3. **Console/stdout** - Application output
+   - INFO level and above
+   - Real-time feedback during game execution
+
+4. **Langfuse Cloud** - Research tracing
+   - Structured traces of games, rounds, and LLM generations
+   - Requires `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`
+   - Used for research analysis and debugging LLM behavior
+
+### Log Levels
+
+- **DEBUG**: Detailed debugging information (file only)
+- **INFO**: General informational messages (file + console)
+- **WARNING**: Warning messages about potential issues
+- **ERROR**: Error messages with exception details
+
+### Configuration
+
+Logging is configured automatically when `GameRunner.setup_game()` is called.
+The log directory can be customized via the `log_dir` config parameter (default: `"logs"`).
+
 ## Development
 
 ### Running Tests

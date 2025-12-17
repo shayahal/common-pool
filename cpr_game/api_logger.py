@@ -9,10 +9,6 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .logger_setup import get_logger
-
-logger = get_logger(__name__)
-
 
 # OpenAI pricing per 1K tokens (as of 2024, update as needed)
 # Format: {model_name: {"input": price_per_1k_tokens, "output": price_per_1k_tokens}}
@@ -185,20 +181,8 @@ class APILogger:
             self.errors.append(error_record)
         
         # Log to file (structured JSON)
+        # Note: Python logger calls are handled in llm_agent.py to avoid duplication
         self._write_to_file(call_record)
-        
-        # Log to Python logger
-        if success:
-            logger.info(
-                f"API call - Player {player_id} | Model: {model} | "
-                f"Tokens: {call_record['total_tokens']} | "
-                f"Latency: {latency:.2f}s | Cost: ${cost:.4f}"
-            )
-        else:
-            logger.error(
-                f"API call failed - Player {player_id} | Model: {model} | "
-                f"Error: {error}"
-            )
         
         return call_record
     

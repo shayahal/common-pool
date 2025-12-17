@@ -11,10 +11,32 @@ from datetime import datetime
 import uuid
 import pandas as pd
 import hashlib
-import json
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Tuple, Optional, Dict
+import warnings
+import logging
+
+# Suppress Streamlit warnings when running outside Streamlit context (e.g., in tests)
+warnings.filterwarnings("ignore", message=".*ScriptRunContext.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*missing ScriptRunContext.*", category=UserWarning)
+
+# Suppress Streamlit logger warnings about missing ScriptRunContext
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.state.session_state_proxy").setLevel(logging.ERROR)
+
+def safe_st_call(func, *args, **kwargs):
+    """Safely call Streamlit functions, catching context errors.
+    
+    This prevents errors when Streamlit code runs outside the Streamlit runtime
+    (e.g., during tests or when imported as a module).
+    """
+    try:
+        return func(*args, **kwargs)
+    except (RuntimeError, AttributeError) as e:
+        # Silently ignore when not in Streamlit context
+        if "ScriptRunContext" in str(e) or "missing" in str(e).lower():
+            return None
+        raise
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -22,12 +44,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 # Setup logs directory
 LOGS_DIR = Path(__file__).parent / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
-DEBUG_LOG_PATH = LOGS_DIR / "debug.log"
 
 from cpr_game.game_runner import GameRunner
 from cpr_game.config import CONFIG
 from cpr_game.db_manager import DatabaseManager
-import time
 
 
 def _run_game_in_tab(config, use_mock_agents):
@@ -263,18 +283,33 @@ def _run_game_in_tab(config, use_mock_agents):
                     )
                     if saved_results and len(saved_results) > 0:
                         player_count = saved_results[0][0]
-                        st.success(f"✓ Game results saved to database ({player_count} players)")
+                        try:
+                            st.success(f"✓ Game results saved to database ({player_count} players)")
+                        except (RuntimeError, AttributeError):
+                            pass  # Not in Streamlit context (e.g., during tests)
                 else:
-                    st.warning("⚠ Game results may not have been saved correctly")
+                    try:
+                        st.warning("⚠ Game results may not have been saved correctly")
+                    except (RuntimeError, AttributeError):
+                        pass  # Not in Streamlit context
             except Exception as e:
                 # Log error but don't fail the game
-                st.warning(f"⚠ Database save failed: {str(e)}")
-                import traceback
-                st.debug(traceback.format_exc())
+                try:
+                    st.warning(f"⚠ Database save failed: {str(e)}")
+                    import traceback
+                    st.debug(traceback.format_exc())
+                except (RuntimeError, AttributeError):
+                    pass  # Not in Streamlit context
         elif not runner.db_manager:
-            st.info("ℹ Database manager not initialized")
+            try:
+                st.info("ℹ Database manager not initialized")
+            except (RuntimeError, AttributeError):
+                pass  # Not in Streamlit context
         elif not runner.db_manager.enabled:
-            st.info("ℹ Database saving is disabled")
+            try:
+                st.info("ℹ Database saving is disabled")
+            except (RuntimeError, AttributeError):
+                pass  # Not in Streamlit context
 
         # Clear progress indicators
         progress_bar.empty()
@@ -329,12 +364,6 @@ def main():
         st.header("⚙️ Game Configuration")
         
         # Basic settings - dynamically extract defaults from CONFIG
-        # #region agent log
-        with open(DEBUG_LOG_PATH, "a") as f:
-            n_players_val = CONFIG["n_players"]
-            max_steps_val = CONFIG["max_steps"]
-            f.write(json.dumps({"sessionId": "debug-session", "runId": "type-check", "hypothesisId": "B", "location": "app.py:38", "message": "slider type checks", "data": {"n_players": {"value": n_players_val, "type": type(n_players_val).__name__}, "max_steps": {"value": max_steps_val, "type": type(max_steps_val).__name__}}, "timestamp": int(time.time() * 1000)}) + "\n")
-        # #endregion
         try:
             n_players = st.slider(
                 "Number of Players", 
@@ -343,8 +372,6 @@ def main():
                 value=CONFIG["n_players"]
             )
         except (TypeError, ValueError) as e:
-            with open(DEBUG_LOG_PATH, "a") as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "error-catch", "hypothesisId": "D", "location": "app.py:46", "message": "ERROR in n_players slider", "data": {"error": str(e), "value": CONFIG["n_players"], "value_type": type(CONFIG["n_players"]).__name__}, "timestamp": int(time.time() * 1000)}) + "\n")
             raise
         try:
             max_steps = st.slider(
@@ -354,8 +381,6 @@ def main():
                 value=CONFIG["max_steps"]
             )
         except (TypeError, ValueError) as e:
-            with open(DEBUG_LOG_PATH, "a") as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "error-catch", "hypothesisId": "D", "location": "app.py:52", "message": "ERROR in max_steps slider", "data": {"error": str(e), "value": CONFIG["max_steps"], "value_type": type(CONFIG["max_steps"]).__name__}, "timestamp": int(time.time() * 1000)}) + "\n")
             raise
         initial_resource = st.number_input(
             "Initial Resource", 
@@ -364,16 +389,6 @@ def main():
             value=CONFIG["initial_resource"], 
             step=10
         )
-        # #region agent log
-        try:
-            regen_rate_val = CONFIG["regeneration_rate"]
-            regen_rate_float = float(regen_rate_val)
-            with open(DEBUG_LOG_PATH, "a") as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "post-fix", "hypothesisId": "A", "location": "app.py:81", "message": "regeneration_rate conversion", "data": {"original": regen_rate_val, "original_type": type(regen_rate_val).__name__, "converted": regen_rate_float, "converted_type": type(regen_rate_float).__name__}, "timestamp": int(time.time() * 1000)}) + "\n")
-        except (TypeError, ValueError) as e:
-            with open(DEBUG_LOG_PATH, "a") as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "error", "hypothesisId": "A", "location": "app.py:81", "message": "ERROR converting regeneration_rate", "data": {"error": str(e)}, "timestamp": int(time.time() * 1000)}) + "\n")
-        # #endregion
         try:
             regeneration_rate = st.slider(
                 "Regeneration Rate", 
@@ -383,8 +398,6 @@ def main():
                 step=0.1
             )
         except (TypeError, ValueError) as e:
-            with open(DEBUG_LOG_PATH, "a") as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "error-catch", "hypothesisId": "A", "location": "app.py:95", "message": "ERROR in regeneration_rate slider", "data": {"error": str(e), "value": CONFIG["regeneration_rate"], "value_type": type(CONFIG["regeneration_rate"]).__name__, "converted_value": float(CONFIG["regeneration_rate"]), "converted_type": type(float(CONFIG["regeneration_rate"])).__name__}, "timestamp": int(time.time() * 1000)}) + "\n")
             raise
         sustainability_threshold = st.number_input(
             "Sustainability Threshold", 

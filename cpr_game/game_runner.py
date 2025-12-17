@@ -86,11 +86,11 @@ class GameRunner:
             self.experiment_id = experiment_id
 
         # Initialize environment
-        print(f"Initializing CPR environment...")
+        logger.info("Initializing CPR environment...")
         self.env = CPREnvironment(self.config)
 
         # Initialize agents
-        print(f"Creating {self.config['n_players']} agents...")
+        logger.info(f"Creating {self.config['n_players']} agents...")
         self.agents = []
 
         for i in range(self.config['n_players']):
@@ -109,7 +109,7 @@ class GameRunner:
                 available_personas = list(self.config.get("persona_prompts", {}).keys())
                 if available_personas:
                     persona = available_personas[0]
-                    print(f"  Warning: Player {i} had empty persona, using '{persona}' instead.")
+                    logger.warning(f"Player {i} had empty persona, using '{persona}' instead.")
                 else:
                     raise ValueError(f"Player {i} has empty persona and no fallback personas available.")
 
@@ -127,19 +127,19 @@ class GameRunner:
                 )
 
             self.agents.append(agent)
-            print(f"  Player {i}: {persona}")
+            logger.debug(f"Player {i}: {persona}")
 
         # Initialize file logging first (so we can see any errors)
         log_dir = self.config.get("log_dir", "logs")
         setup_logging(log_dir=log_dir)
         
         # Initialize logging - Langfuse is required
-        print("Initializing Langfuse logging...")
+        logger.info("Initializing Langfuse logging...")
         try:
             self.logger = LoggingManager(self.config)
-            print("✓ Langfuse client initialized successfully")
+            logger.info("✓ Langfuse client initialized successfully")
         except Exception as e:
-            print(f"❌ ERROR: Failed to initialize Langfuse: {e}")
+            logger.error(f"❌ ERROR: Failed to initialize Langfuse: {e}")
             raise
 
         # Initialize dashboard (optional)
@@ -160,7 +160,7 @@ class GameRunner:
             logger.error(f"Failed to initialize database manager: {e}", exc_info=True)
             self.db_manager = None
 
-        print(f"\n✓ Game setup complete: {self.game_id}\n")
+        logger.info(f"✓ Game setup complete: {self.game_id}")
 
         return self.game_id
 
@@ -316,9 +316,9 @@ class GameRunner:
             }
             self.logger.log_round_metrics(step, round_metrics)
 
-            # Print summary
+            # Log summary
             if verbose:
-                print(format_round_summary(
+                logger.info(format_round_summary(
                     step + 1,
                     info["resource"],
                     actions,
@@ -347,14 +347,14 @@ class GameRunner:
         if self.dashboard:
             self.dashboard.show_summary(summary)
 
-        # Print final summary
+        # Log final summary
         if verbose:
-            print("\n" + "=" * 60)
-            print("GAME SUMMARY")
-            print("=" * 60)
+            logger.info("\n" + "=" * 60)
+            logger.info("GAME SUMMARY")
+            logger.info("=" * 60)
             for key, value in summary.items():
-                print(f"{key}: {value}")
-            print("=" * 60 + "\n")
+                logger.info(f"{key}: {value}")
+            logger.info("=" * 60 + "\n")
 
         # Store in history
         self.game_history.append({
@@ -405,14 +405,14 @@ class GameRunner:
         Returns:
             List of game summaries
         """
-        print(f"\n{'=' * 60}")
-        print(f"RUNNING TOURNAMENT: {n_games} games")
-        print(f"{'=' * 60}\n")
+        logger.info(f"\n{'=' * 60}")
+        logger.info(f"RUNNING TOURNAMENT: {n_games} games")
+        logger.info(f"{'=' * 60}\n")
 
         results = []
 
         for i in range(n_games):
-            print(f"\n--- Game {i + 1}/{n_games} ---")
+            logger.info(f"\n--- Game {i + 1}/{n_games} ---")
 
             # Setup new game
             game_id = f"tournament_game_{i + 1}"
@@ -423,25 +423,25 @@ class GameRunner:
             results.append(summary)
 
             # Brief summary
-            print(f"Result: {summary['total_rounds']} rounds, "
+            logger.info(f"Result: {summary['total_rounds']} rounds, "
                   f"{'DEPLETED' if summary['tragedy_occurred'] else 'SUSTAINED'}, "
                   f"Cooperation: {summary['avg_cooperation_index']:.3f}")
 
         # Aggregate statistics
-        print(f"\n{'=' * 60}")
-        print("TOURNAMENT RESULTS")
-        print(f"{'=' * 60}")
+        logger.info(f"\n{'=' * 60}")
+        logger.info("TOURNAMENT RESULTS")
+        logger.info(f"{'=' * 60}")
 
         tragedy_rate = sum(1 for r in results if r['tragedy_occurred']) / n_games
         avg_rounds = np.mean([r['total_rounds'] for r in results])
         avg_cooperation = np.mean([r['avg_cooperation_index'] for r in results])
         avg_gini = np.mean([r['gini_coefficient'] for r in results])
 
-        print(f"Tragedy Rate: {tragedy_rate:.1%}")
-        print(f"Average Rounds: {avg_rounds:.1f}")
-        print(f"Average Cooperation: {avg_cooperation:.3f}")
-        print(f"Average Gini Coefficient: {avg_gini:.3f}")
-        print(f"{'=' * 60}\n")
+        logger.info(f"Tragedy Rate: {tragedy_rate:.1%}")
+        logger.info(f"Average Rounds: {avg_rounds:.1f}")
+        logger.info(f"Average Cooperation: {avg_cooperation:.3f}")
+        logger.info(f"Average Gini Coefficient: {avg_gini:.3f}")
+        logger.info(f"{'=' * 60}\n")
 
         return results
 
@@ -469,7 +469,7 @@ class GameRunner:
         with open(output_path, 'w') as f:
             json.dump(output_data, f, indent=2, default=str)
 
-        print(f"Results exported to {output_path}")
+        logger.info(f"Results exported to {output_path}")
 
     def get_latest_summary(self) -> Optional[Dict]:
         """Get summary from most recent game.
@@ -512,7 +512,7 @@ def quick_game(
 
 if __name__ == "__main__":
     # Example usage
-    print("Running example CPR game...\n")
+    logger.info("Running example CPR game...\n")
 
     # Create runner with mock agents (no API calls required)
     runner = GameRunner(use_mock_agents=True)
@@ -523,4 +523,4 @@ if __name__ == "__main__":
     # Run single game
     summary = runner.run_episode(visualize=False, verbose=True)
 
-    print("\nGame complete!")
+    logger.info("\nGame complete!")

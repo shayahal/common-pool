@@ -95,9 +95,76 @@ class DatabaseManager:
                     name TEXT NOT NULL,
                     status TEXT NOT NULL,
                     created_at TIMESTAMP NOT NULL,
-                    parameters TEXT NOT NULL
+                    n_players INTEGER NOT NULL,
+                    max_steps INTEGER NOT NULL,
+                    initial_resource INTEGER NOT NULL,
+                    regeneration_rate DOUBLE NOT NULL,
+                    max_extraction INTEGER NOT NULL,
+                    max_fishes INTEGER NOT NULL,
+                    number_of_games INTEGER NOT NULL,
+                    number_of_players_per_game INTEGER NOT NULL
                 )
             """)
+            
+            # Migration: Check if we need to add parameter columns
+            # Try to query one of the new columns to see if they exist
+            try:
+                self.conn.execute("SELECT n_players FROM experiments LIMIT 0")
+                # If we get here, new columns exist - no migration needed
+            except Exception:
+                # New columns don't exist - need to add them
+                logger.info("Migrating experiments table: adding parameter columns")
+                try:
+                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS n_players INTEGER")
+                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS max_steps INTEGER")
+                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS initial_resource INTEGER")
+                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS regeneration_rate DOUBLE")
+                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS max_extraction INTEGER")
+                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS max_fishes INTEGER")
+                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS number_of_games INTEGER")
+                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS number_of_players_per_game INTEGER")
+                    
+                    # Try to migrate existing data from JSON to columns (if any exists)
+                    try:
+                        # Check if parameters column exists
+                        columns = self.conn.execute("DESCRIBE experiments").fetchall()
+                        column_names = [col[0] for col in columns]
+                        if "parameters" in column_names:
+                            existing = self.conn.execute("SELECT experiment_id, parameters FROM experiments WHERE parameters IS NOT NULL").fetchall()
+                            for exp_id, params_json in existing:
+                                try:
+                                    params = json.loads(params_json)
+                                    self.conn.execute("""
+                                        UPDATE experiments SET
+                                            n_players = ?,
+                                            max_steps = ?,
+                                            initial_resource = ?,
+                                            regeneration_rate = ?,
+                                            max_extraction = ?,
+                                            max_fishes = ?,
+                                            number_of_games = ?,
+                                            number_of_players_per_game = ?
+                                        WHERE experiment_id = ?
+                                    """, (
+                                        params.get("n_players"),
+                                        params.get("max_steps"),
+                                        params.get("initial_resource"),
+                                        params.get("regeneration_rate"),
+                                        params.get("max_extraction"),
+                                        params.get("max_fishes"),
+                                        params.get("number_of_games"),
+                                        params.get("number_of_players_per_game"),
+                                        exp_id
+                                    ))
+                                except (json.JSONDecodeError, KeyError) as e:
+                                    logger.warning(f"Could not migrate parameters for experiment {exp_id}: {e}")
+                                    continue
+                            logger.info("Migration complete: existing data migrated to new columns")
+                    except Exception as e:
+                        logger.warning(f"Could not migrate existing parameter data: {e}")
+                except Exception as e:
+                    logger.warning(f"Migration warning: {e}")
+                    # Columns might already exist
             
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS experiment_players (
@@ -120,6 +187,37 @@ class DatabaseManager:
                     FOREIGN KEY (experiment_id) REFERENCES experiments(experiment_id)
                 )
             """)
+            
+            # Add new columns if they don't exist (for migration from old schema)
+            try:
+                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS winning_player_id INTEGER")
+            except Exception:
+                pass  # Column might already exist or error is expected
+            
+            try:
+                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS winning_payoff DOUBLE")
+            except Exception:
+                pass
+            
+            try:
+                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS cumulative_payoff_sum DOUBLE")
+            except Exception:
+                pass
+            
+            try:
+                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS total_rounds INTEGER")
+            except Exception:
+                pass
+            
+            try:
+                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS final_resource_level DOUBLE")
+            except Exception:
+                pass
+            
+            try:
+                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS tragedy_occurred BOOLEAN")
+            except Exception:
+                pass
             
             logger.debug("Game results and experiment tables created or already exist")
         except Exception as e:
@@ -369,19 +467,79 @@ class DatabaseManager:
             return False
         
         try:
-            # Convert parameters to JSON string
-            parameters_json = json.dumps(parameters)
+            # Extract parameters
+            n_players = parameters.get("n_players")
+            max_steps = parameters.get("max_steps")
+            initial_resource = parameters.get("initial_resource")
+            regeneration_rate = parameters.get("regeneration_rate")
+            max_extraction = parameters.get("max_extraction")
+            max_fishes = parameters.get("max_fishes")
+            number_of_games = parameters.get("number_of_games")
+            number_of_players_per_game = parameters.get("number_of_players_per_game")
             
-            # Insert or update experiment
-            self.conn.execute("""
-                INSERT INTO experiments (experiment_id, name, status, created_at, parameters)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (experiment_id) 
-                DO UPDATE SET 
-                    name = EXCLUDED.name,
-                    status = EXCLUDED.status,
-                    parameters = EXCLUDED.parameters
-            """, (experiment_id, name, "pending", datetime.now(), parameters_json))
+            # Check if parameters column exists (for migration compatibility)
+            has_old_parameters_column = False
+            try:
+                columns = self.conn.execute("DESCRIBE experiments").fetchall()
+                column_names = [col[0] for col in columns]
+                has_old_parameters_column = "parameters" in column_names
+            except Exception:
+                pass
+            
+            # Build INSERT statement - include parameters column if it exists (for migration)
+            if has_old_parameters_column:
+                # Include parameters column with empty string (since it may be NOT NULL)
+                # New code uses the individual columns, but we include parameters for compatibility
+                self.conn.execute("""
+                    INSERT INTO experiments (
+                        experiment_id, name, status, created_at, parameters,
+                        n_players, max_steps, initial_resource, regeneration_rate,
+                        max_extraction, max_fishes, number_of_games, number_of_players_per_game
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (experiment_id) 
+                    DO UPDATE SET 
+                        name = EXCLUDED.name,
+                        status = EXCLUDED.status,
+                        n_players = EXCLUDED.n_players,
+                        max_steps = EXCLUDED.max_steps,
+                        initial_resource = EXCLUDED.initial_resource,
+                        regeneration_rate = EXCLUDED.regeneration_rate,
+                        max_extraction = EXCLUDED.max_extraction,
+                        max_fishes = EXCLUDED.max_fishes,
+                        number_of_games = EXCLUDED.number_of_games,
+                        number_of_players_per_game = EXCLUDED.number_of_players_per_game
+                """, (
+                    experiment_id, name, "pending", datetime.now(), "",
+                    n_players, max_steps, initial_resource, regeneration_rate,
+                    max_extraction, max_fishes, number_of_games, number_of_players_per_game
+                ))
+            else:
+                # New schema - no parameters column
+                self.conn.execute("""
+                    INSERT INTO experiments (
+                        experiment_id, name, status, created_at,
+                        n_players, max_steps, initial_resource, regeneration_rate,
+                        max_extraction, max_fishes, number_of_games, number_of_players_per_game
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (experiment_id) 
+                    DO UPDATE SET 
+                        name = EXCLUDED.name,
+                        status = EXCLUDED.status,
+                        n_players = EXCLUDED.n_players,
+                        max_steps = EXCLUDED.max_steps,
+                        initial_resource = EXCLUDED.initial_resource,
+                        regeneration_rate = EXCLUDED.regeneration_rate,
+                        max_extraction = EXCLUDED.max_extraction,
+                        max_fishes = EXCLUDED.max_fishes,
+                        number_of_games = EXCLUDED.number_of_games,
+                        number_of_players_per_game = EXCLUDED.number_of_players_per_game
+                """, (
+                    experiment_id, name, "pending", datetime.now(),
+                    n_players, max_steps, initial_resource, regeneration_rate,
+                    max_extraction, max_fishes, number_of_games, number_of_players_per_game
+                ))
             
             # Delete existing players for this experiment (for updates)
             self.conn.execute(
@@ -423,17 +581,52 @@ class DatabaseManager:
             return None
         
         try:
-            # Load experiment
-            exp_result = self.conn.execute(
-                "SELECT name, status, created_at, parameters FROM experiments WHERE experiment_id = ?",
-                [experiment_id]
-            ).fetchone()
+            # Try to load with new schema (parameter columns)
+            try:
+                exp_result = self.conn.execute("""
+                    SELECT name, status, created_at,
+                           n_players, max_steps, initial_resource, regeneration_rate,
+                           max_extraction, max_fishes, number_of_games, number_of_players_per_game
+                    FROM experiments WHERE experiment_id = ?
+                """, [experiment_id]).fetchone()
+                
+                if exp_result is None:
+                    return None
+                
+                name, status, created_at, n_players, max_steps, initial_resource, regeneration_rate, \
+                    max_extraction, max_fishes, number_of_games, number_of_players_per_game = exp_result
+            except Exception:
+                # Fallback to old schema (parameters JSON column)
+                exp_result = self.conn.execute(
+                    "SELECT name, status, created_at, parameters FROM experiments WHERE experiment_id = ?",
+                    [experiment_id]
+                ).fetchone()
+                
+                if exp_result is None:
+                    return None
+                
+                name, status, created_at, parameters_json = exp_result
+                parameters_dict = json.loads(parameters_json)
+                n_players = parameters_dict.get("n_players")
+                max_steps = parameters_dict.get("max_steps")
+                initial_resource = parameters_dict.get("initial_resource")
+                regeneration_rate = parameters_dict.get("regeneration_rate")
+                max_extraction = parameters_dict.get("max_extraction")
+                max_fishes = parameters_dict.get("max_fishes")
+                number_of_games = parameters_dict.get("number_of_games")
+                number_of_players_per_game = parameters_dict.get("number_of_players_per_game")
             
-            if exp_result is None:
-                return None
-            
-            name, status, created_at, parameters_json = exp_result
-            parameters = json.loads(parameters_json)
+            # Reconstruct parameters dict for backward compatibility
+            parameters = {
+                "n_players": n_players,
+                "max_steps": max_steps,
+                "initial_resource": initial_resource,
+                "regeneration_rate": regeneration_rate,
+                "max_extraction": max_extraction,
+                "max_fishes": max_fishes,
+                "number_of_games": number_of_games,
+                "number_of_players_per_game": number_of_players_per_game,
+            }
             
             # Load players
             player_results = self.conn.execute(
@@ -556,14 +749,55 @@ class DatabaseManager:
             summary_json = json.dumps(summary, default=str)
             timestamp = datetime.now()
             
+            # Extract and calculate required fields from summary
+            cumulative_payoffs = summary.get("cumulative_payoffs", [])
+            
+            # Calculate winning player and payoff
+            winning_player_id = None
+            winning_payoff = None
+            cumulative_payoff_sum = None
+            
+            if cumulative_payoffs:
+                # Find player with highest payoff
+                max_payoff = max(cumulative_payoffs)
+                winning_player_id = cumulative_payoffs.index(max_payoff)
+                winning_payoff = float(max_payoff)
+                cumulative_payoff_sum = float(sum(cumulative_payoffs))
+            
+            # Extract other fields
+            total_rounds = summary.get("total_rounds")
+            final_resource_level = summary.get("final_resource_level")
+            tragedy_occurred = summary.get("tragedy_occurred", False)
+            
+            # Convert to appropriate types
+            if total_rounds is not None:
+                total_rounds = int(total_rounds)
+            if final_resource_level is not None:
+                final_resource_level = float(final_resource_level)
+            tragedy_occurred = bool(tragedy_occurred)
+            
             self.conn.execute("""
-                INSERT INTO experiment_results (experiment_id, game_id, summary, timestamp)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO experiment_results (
+                    experiment_id, game_id, summary, timestamp,
+                    winning_player_id, winning_payoff, cumulative_payoff_sum,
+                    total_rounds, final_resource_level, tragedy_occurred
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (experiment_id, game_id) 
                 DO UPDATE SET 
                     summary = EXCLUDED.summary,
-                    timestamp = EXCLUDED.timestamp
-            """, (experiment_id, game_id, summary_json, timestamp))
+                    timestamp = EXCLUDED.timestamp,
+                    winning_player_id = EXCLUDED.winning_player_id,
+                    winning_payoff = EXCLUDED.winning_payoff,
+                    cumulative_payoff_sum = EXCLUDED.cumulative_payoff_sum,
+                    total_rounds = EXCLUDED.total_rounds,
+                    final_resource_level = EXCLUDED.final_resource_level,
+                    tragedy_occurred = EXCLUDED.tragedy_occurred
+            """, (
+                experiment_id, game_id, summary_json, timestamp,
+                winning_player_id, winning_payoff, cumulative_payoff_sum,
+                total_rounds, final_resource_level, tragedy_occurred
+            ))
             
             self.conn.commit()
             logger.debug(f"Saved result for game {game_id} in experiment {experiment_id}")

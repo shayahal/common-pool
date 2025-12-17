@@ -2,6 +2,16 @@
 
 Provides hierarchical tracing of games, rounds, and LLM generations
 with custom metrics for research analysis.
+
+Logging Destinations:
+    - Langfuse Cloud: Structured traces sent to Langfuse service
+      (requires LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
+    - In-memory storage: Round metrics, generation data, API metrics
+      (for dashboard display and analysis)
+    
+This module handles high-level game tracing for research purposes.
+For application-level logging, see logger_setup.py (writes to logs/cpr_game.log).
+For API call metrics, see api_logger.py (writes to logs/api_calls.log).
 """
 
 from typing import Dict, List, Optional, Any

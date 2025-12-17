@@ -1,6 +1,17 @@
 """Logging setup for CPR game.
 
 Provides a centralized logger configuration.
+
+Logging Destinations:
+    - logs/cpr_game.log: Main application log file (DEBUG level and above)
+    - Console/stdout: Application logs (INFO level and above)
+    
+This module configures Python's standard logging system. All application
+logs (from logger.info(), logger.error(), etc.) go to both the log file
+and console output.
+
+For API-specific logging, see api_logger.py (writes to logs/api_calls.log).
+For Langfuse tracing, see logging_manager.py (sends to cloud service).
 """
 
 import logging
@@ -8,13 +19,39 @@ import sys
 import json
 from pathlib import Path
 from datetime import datetime
+import warnings
+
+# Suppress Streamlit warnings when running outside Streamlit context (e.g., in tests)
+# These warnings occur when Streamlit code runs outside the Streamlit runtime
+warnings.filterwarnings("ignore", message=".*ScriptRunContext.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*missing ScriptRunContext.*", category=UserWarning)
+
+# Suppress Streamlit logger warnings about missing ScriptRunContext
+# Set to CRITICAL to completely suppress these warnings
+streamlit_loggers = [
+    "streamlit.runtime.scriptrunner_utils.script_run_context",
+    "streamlit.runtime.state.session_state_proxy",
+]
+
+for logger_name in streamlit_loggers:
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.CRITICAL)
+    # Also add a filter to catch any remaining warnings
+    class ScriptRunContextFilter(logging.Filter):
+        def filter(self, record):
+            return "ScriptRunContext" not in record.getMessage()
+    logger.addFilter(ScriptRunContextFilter())
 
 
 def setup_logging(log_dir: str = "logs") -> None:
     """Setup logging configuration.
     
+    Configures Python logging to write to:
+    - File: {log_dir}/cpr_game.log (DEBUG level and above)
+    - Console: stdout (INFO level and above)
+    
     Args:
-        log_dir: Directory to store log files
+        log_dir: Directory to store log files (default: "logs")
     """
     log_path = Path(log_dir)
     log_path.mkdir(exist_ok=True)
