@@ -194,7 +194,9 @@ def experiment_sustainability_threshold(thresholds: list = None):
 
         results[f"threshold_{threshold}"] = summary
 
-        print(f"Sustainability Score: {summary['sustainability_score']:.1%}")
+        sustainability_score = summary.get('sustainability_score', 0.0)
+        if sustainability_score > 0:
+            print(f"Sustainability Score: {sustainability_score:.1%}")
         print(f"Final Resource: {summary['final_resource_level']:.1f}")
 
     # Save results
@@ -205,6 +207,75 @@ def experiment_sustainability_threshold(thresholds: list = None):
     print(f"\n✓ Results saved to {output_path}")
 
     return results
+
+
+def experiment_null_personas(n_games: int = 5, n_players: int = 2):
+    """Run experiment with null personas (no personality traits).
+
+    Args:
+        n_games: Number of games to run
+        n_players: Number of players
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT: Null Personas")
+    print("=" * 70 + "\n")
+
+    config = CONFIG.copy()
+    config["n_players"] = n_players
+    config["player_personas"] = [""] * n_players  # Empty string = null persona
+    config["max_steps"] = 50
+
+    runner = GameRunner(config, use_mock_agents=True, use_mock_logging=True)
+
+    results = []
+    for i in range(n_games):
+        print(f"\nGame {i + 1}/{n_games}")
+        print("-" * 50)
+        
+        runner.setup_game(f"null_personas_game_{i}")
+        summary = runner.run_episode(visualize=False, verbose=False)
+        results.append(summary)
+
+        print(f"Tragedy: {'Yes' if summary['tragedy_occurred'] else 'No'}")
+        print(f"Rounds: {summary['total_rounds']}")
+        print(f"Final Resource: {summary['final_resource_level']:.1f}")
+        print(f"Avg Cooperation: {summary['avg_cooperation_index']:.3f}")
+
+    # Aggregate statistics
+    tragedy_rate = sum(1 for r in results if r['tragedy_occurred']) / n_games
+    avg_cooperation = np.mean([r['avg_cooperation_index'] for r in results])
+    avg_rounds = np.mean([r['total_rounds'] for r in results])
+    avg_final_resource = np.mean([r['final_resource_level'] for r in results])
+    avg_gini = np.mean([r['gini_coefficient'] for r in results])
+
+    aggregated = {
+        "tragedy_rate": float(tragedy_rate),
+        "avg_cooperation": float(avg_cooperation),
+        "avg_rounds": float(avg_rounds),
+        "avg_final_resource": float(avg_final_resource),
+        "avg_gini_coefficient": float(avg_gini),
+        "n_games": n_games,
+        "n_players": n_players,
+        "games": results,
+    }
+
+    print("\n" + "=" * 70)
+    print("AGGREGATED RESULTS")
+    print("=" * 70)
+    print(f"Tragedy Rate: {tragedy_rate:.1%}")
+    print(f"Avg Cooperation: {avg_cooperation:.3f}")
+    print(f"Avg Rounds: {avg_rounds:.1f}")
+    print(f"Avg Final Resource: {avg_final_resource:.1f}")
+    print(f"Avg Gini Coefficient: {avg_gini:.3f}")
+
+    # Save results
+    output_path = Path(__file__).parent / "results_null_personas.json"
+    with open(output_path, 'w') as f:
+        json.dump(aggregated, f, indent=2, default=str)
+
+    print(f"\n✓ Results saved to {output_path}")
+
+    return aggregated
 
 
 def main():
@@ -218,10 +289,29 @@ def main():
     experiment_regeneration_rate()
     experiment_player_count()
     experiment_sustainability_threshold()
+    experiment_null_personas(n_games=5)
 
     print("\n" + "=" * 70)
     print("ALL EXPERIMENTS COMPLETE")
     print("=" * 70 + "\n")
+
+
+if __name__ == "__main__":
+    # Allow running specific experiments
+    import sys
+    
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "null":
+            experiment_null_personas(n_games=5)
+        elif sys.argv[1] == "personas":
+            experiment_persona_comparison(n_games=5)
+        elif sys.argv[1] == "all":
+            main()
+        else:
+            print(f"Unknown experiment: {sys.argv[1]}")
+            print("Available: null, personas, all")
+    else:
+        main()
 
 
 if __name__ == "__main__":

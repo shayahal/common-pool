@@ -8,6 +8,11 @@ tournaments, and analyzing results.
 from cpr_game import GameRunner
 from cpr_game.config import CONFIG
 import json
+import logging
+
+# Setup logging for error reporting
+logging.basicConfig(level=logging.ERROR, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 
 def example_1_basic_game():
@@ -189,8 +194,16 @@ def main():
     for name, func in examples:
         try:
             func()
+        except (ValueError, TypeError, AttributeError) as e:
+            logger.error(f"Error in {name}: {type(e).__name__}: {e}", exc_info=True)
+            print(f"\n❌ Error in {name}: {type(e).__name__}: {e}")
+        except (KeyError, IndexError) as e:
+            logger.error(f"Configuration error in {name}: {type(e).__name__}: {e}", exc_info=True)
+            print(f"\n❌ Configuration error in {name}: {type(e).__name__}: {e}")
         except Exception as e:
-            print(f"\n❌ Error in {name}: {e}")
+            # Catch any other unexpected exceptions
+            logger.error(f"Unexpected error in {name}: {type(e).__name__}: {e}", exc_info=True)
+            print(f"\n❌ Unexpected error in {name}: {type(e).__name__}: {e}")
 
     print("\n" + "=" * 80)
     print("ALL EXAMPLES COMPLETE")

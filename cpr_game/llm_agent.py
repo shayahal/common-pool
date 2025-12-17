@@ -7,6 +7,7 @@ game state, history, and persona-based reasoning.
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 from openai import OpenAI
+from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError, AuthenticationError
 
 from .config import CONFIG
 from .utils import parse_extraction_from_text, validate_action
@@ -48,7 +49,6 @@ class LLMAgent:
         # Game parameters
         self.min_extraction = self.config["min_extraction"]
         self.max_extraction = self.config["max_extraction"]
-        self.sustainability_threshold = self.config["sustainability_threshold"]
         self.history_rounds = self.config["include_history_rounds"]
 
         # Get persona prompt
@@ -68,7 +68,7 @@ class LLMAgent:
 
         # Memory
         self.observation_history: List[Dict] = []
-        self.action_history: List[float] = []
+        self.action_history: List[int] = []
         self.reward_history: List[float] = []
         self.reasoning_history: List[str] = []
 
@@ -76,7 +76,7 @@ class LLMAgent:
         self,
         observation: Dict,
         return_reasoning: bool = True
-    ) -> Tuple[float, Optional[str]]:
+    ) -> Tuple[int, Optional[str]]:
         """Decide extraction amount based on current observation.
 
         Args:
@@ -85,6 +85,7 @@ class LLMAgent:
 
         Returns:
             Tuple of (extraction_amount, reasoning_text)
+            extraction_amount is an integer
         """
         # Build prompt
         prompt = self._build_prompt(observation)
@@ -104,10 +105,19 @@ class LLMAgent:
 
             response_text = response.choices[0].message.content
 
+        except (APIError, APIConnectionError, RateLimitError, APITimeoutError, AuthenticationError) as e:
+            print(f"Error calling LLM API: {type(e).__name__}: {e}")
+            # Fallback to random action (integer)
+            response_text = f"EXTRACT: {int(np.random.uniform(self.min_extraction, self.max_extraction))}"
+        except (AttributeError, IndexError, KeyError) as e:
+            print(f"Error parsing LLM response: {type(e).__name__}: {e}")
+            # Fallback to random action (integer)
+            response_text = f"EXTRACT: {int(np.random.uniform(self.min_extraction, self.max_extraction))}"
         except Exception as e:
-            print(f"Error calling LLM: {e}")
-            # Fallback to random action
-            response_text = f"EXTRACT: {np.random.uniform(self.min_extraction, self.max_extraction):.2f}"
+            # Catch any other unexpected exceptions
+            print(f"Unexpected error calling LLM: {type(e).__name__}: {e}")
+            # Fallback to random action (integer)
+            response_text = f"EXTRACT: {int(np.random.uniform(self.min_extraction, self.max_extraction))}"
 
         # Parse action from response
         action, reasoning = parse_extraction_from_text(
@@ -149,8 +159,6 @@ class LLMAgent:
 
 Resource Status:
 - Current resource level: {resource:.2f}
-- Sustainable threshold: {self.sustainability_threshold:.2f}
-- Your goal: Balance personal gain with sustainability
 
 """
 
@@ -164,7 +172,7 @@ Resource Status:
                 extraction = self.action_history[idx]
                 # Check if reward_history has enough elements for this negative index
                 reward = self.reward_history[idx] if abs(idx) <= len(self.reward_history) else 0.0
-                prompt += f"- Round {round_num}: Extracted {extraction:.2f}, Earned {reward:.2f}\n"
+                prompt += f"- Round {round_num}: Extracted {extraction}, Earned {reward:.2f}\n"
             prompt += "\n"
 
         # Add other players' history if enabled
@@ -189,7 +197,7 @@ Resource Status:
                     if obs_idx < other_extractions.shape[0]:
                         extraction = other_extractions[obs_idx, player_idx]
                         if extraction > 0 or round_num >= 0:  # Only show if not padding
-                            prompt += f"  Round {round_num}: Extracted {extraction:.2f}\n"
+                            prompt += f"  Round {round_num}: Extracted {int(extraction)}\n"
 
             prompt += "\n"
 
@@ -204,13 +212,14 @@ Resource Status:
         prompt += "\n"
 
         # Add instructions
-        prompt += """Instructions:
+        prompt += f"""Instructions:
 1. Analyze the current situation carefully
-2. Consider the resource level and sustainability
+2. Consider the resource level and available extraction
 3. Think about what other players might do
-4. Decide how much to extract this round (0-100)
-5. Explain your reasoning briefly
-6. State your action clearly as "EXTRACT: <number>"
+4. Decide how much to extract this round (0-{int(self.max_extraction)})
+5. Your extraction amount must be a whole number (integer)
+6. Explain your reasoning briefly
+7. State your action clearly as "EXTRACT: <integer>"
 
 Your response:"""
 
@@ -273,12 +282,11 @@ class MockLLMAgent(LLMAgent):
         # Game parameters
         self.min_extraction = self.config["min_extraction"]
         self.max_extraction = self.config["max_extraction"]
-        self.sustainability_threshold = self.config["sustainability_threshold"]
         self.history_rounds = self.config["include_history_rounds"]
 
         # Memory
         self.observation_history: List[Dict] = []
-        self.action_history: List[float] = []
+        self.action_history: List[int] = []
         self.reward_history: List[float] = []
         self.reasoning_history: List[str] = []
 
@@ -286,7 +294,7 @@ class MockLLMAgent(LLMAgent):
         self,
         observation: Dict,
         return_reasoning: bool = True
-    ) -> Tuple[float, Optional[str]]:
+    ) -> Tuple[int, Optional[str]]:
         """Decide extraction using simple heuristics.
 
         Args:
@@ -295,16 +303,17 @@ class MockLLMAgent(LLMAgent):
 
         Returns:
             Tuple of (extraction_amount, reasoning_text)
+            extraction_amount is an integer
         """
         resource = observation["resource_level"][0]
 
         # Simple heuristic based on persona
         if self.persona == "rational_selfish":
-            # Extract more aggressively
-            action = min(resource * 0.15, self.max_extraction)
+            # Extract more aggressively (30% of resource)
+            action = min(resource * 0.30, self.max_extraction)
             reasoning = "Maximizing personal gain by extracting aggressively."
         elif self.persona == "cooperative":
-            # Extract sustainably
+            # Extract sustainably (5% of resource)
             action = min(resource * 0.05, self.max_extraction)
             reasoning = "Extracting conservatively to maintain resource for everyone."
         else:
@@ -312,9 +321,9 @@ class MockLLMAgent(LLMAgent):
             action = min(resource * 0.10, self.max_extraction)
             reasoning = "Extracting a moderate amount."
 
-        # Add some randomness
-        action = action * np.random.uniform(0.8, 1.2)
-        action = validate_action(action, self.min_extraction, self.max_extraction)
+        # Add some randomness (reduced range for more consistent behavior)
+        action = action * np.random.uniform(0.9, 1.1)
+        action = int(np.clip(action, self.min_extraction, self.max_extraction))
 
         # Store action and reasoning
         self.action_history.append(action)

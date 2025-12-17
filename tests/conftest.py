@@ -15,7 +15,6 @@ def sample_config():
         "min_resource": 0.0,
         "min_extraction": 0.0,
         "max_extraction": 100.0,
-        "extraction_value": 1.0,
         "depletion_penalty": -1000.0,
         "sustainability_bonus": 10.0,
         "sustainability_threshold": 500.0,

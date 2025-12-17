@@ -205,8 +205,8 @@ class GameRunner:
                     info["cumulative_payoffs"]
                 ))
 
-            # Update dashboard
-            if self.dashboard:
+            # Update dashboard (only if visualization is enabled)
+            if self.dashboard and visualize:
                 game_state = self.env.render(mode="dict")
                 self.dashboard.update(game_state)
 

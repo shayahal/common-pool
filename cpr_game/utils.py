@@ -92,7 +92,7 @@ def parse_extraction_from_text(text: str, min_val: float = 0.0, max_val: float =
     """Extract numerical action from LLM response text.
 
     Looks for pattern "EXTRACT: <number>" first, then falls back to
-    finding any number in the text.
+    finding any number in the text. Returns float extraction amount.
 
     Args:
         text: LLM response text
@@ -101,10 +101,11 @@ def parse_extraction_from_text(text: str, min_val: float = 0.0, max_val: float =
 
     Returns:
         Tuple of (extraction_amount, reasoning_text)
+        extraction_amount is a float
         reasoning_text is the part before "EXTRACT:" if found
     """
     # Try to find explicit "EXTRACT: number" pattern
-    extract_pattern = r"EXTRACT:\s*(\d+\.?\d*)"
+    extract_pattern = r"EXTRACT:\s*([+-]?\d+\.?\d*)"
     match = re.search(extract_pattern, text, re.IGNORECASE)
 
     reasoning = None
@@ -117,7 +118,7 @@ def parse_extraction_from_text(text: str, min_val: float = 0.0, max_val: float =
             reasoning = text[:reasoning_end].strip()
     else:
         # Fallback: find last number in the text
-        numbers = re.findall(r"\d+\.?\d*", text)
+        numbers = re.findall(r"[+-]?\d+\.?\d*", text)
         if numbers:
             value = float(numbers[-1])
             reasoning = text.strip()
@@ -126,10 +127,10 @@ def parse_extraction_from_text(text: str, min_val: float = 0.0, max_val: float =
             value = min_val
             reasoning = text.strip()
 
-    # Clip to valid range
-    value = np.clip(value, min_val, max_val)
+    # Clip to valid range (keep as float)
+    value = float(np.clip(value, min_val, max_val))
 
-    return float(value), reasoning
+    return value, reasoning
 
 
 def format_round_summary(
@@ -158,9 +159,9 @@ def format_round_summary(
     summary += f"\nPlayer Actions:\n"
 
     for i, (extraction, reward, total) in enumerate(zip(extractions, rewards, cumulative_payoffs)):
-        summary += f"  Player {i}: Extracted {extraction:.2f} | Reward {reward:.2f} | Total {total:.2f}\n"
+        summary += f"  Player {i}: Extracted {int(extraction)} | Reward {reward:.2f} | Total {total:.2f}\n"
 
-    summary += f"\nTotal Extracted: {np.sum(extractions):.2f}\n"
+    summary += f"\nTotal Extracted: {int(np.sum(extractions))}\n"
 
     return summary
 
@@ -242,7 +243,7 @@ def calculate_extraction_trend(extraction_history: List[np.ndarray], player_id: 
     return float(slope)
 
 
-def validate_action(action: float, min_val: float, max_val: float) -> float:
+def validate_action(action: float, min_val: float, max_val: float) -> int:
     """Validate and clip action to valid range.
 
     Args:
@@ -251,9 +252,10 @@ def validate_action(action: float, min_val: float, max_val: float) -> float:
         max_val: Maximum allowed value
 
     Returns:
-        float: Clipped action
+        int: Clipped and rounded action (integer)
     """
-    return float(np.clip(action, min_val, max_val))
+    clipped = np.clip(action, min_val, max_val)
+    return int(round(clipped))
 
 
 def calculate_nash_extraction(

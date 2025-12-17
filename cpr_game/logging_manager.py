@@ -6,17 +6,14 @@ with custom metrics for research analysis.
 
 from typing import Dict, List, Optional, Any
 import time
+import logging
 from datetime import datetime
-
-try:
-    from langfuse import Langfuse
-    from langfuse.decorators import observe, langfuse_context
-    LANGFUSE_AVAILABLE = True
-except ImportError:
-    LANGFUSE_AVAILABLE = False
-    print("Warning: Langfuse not installed. Logging will be disabled.")
+from langfuse import Langfuse
 
 from .config import CONFIG
+from .logger_setup import get_logger
+
+logger = get_logger(__name__)
 
 
 class LoggingManager:
@@ -42,21 +39,30 @@ class LoggingManager:
             config: Configuration dictionary
         """
         self.config = config if config is not None else CONFIG
-        self.enabled = self.config.get("langfuse_enabled", False) and LANGFUSE_AVAILABLE
-
-        if self.enabled:
+        
+        # Initialize Langfuse client only if enabled and keys are provided
+        self.client = None
+        if self.config.get("langfuse_enabled", False):
             try:
-                self.client = Langfuse(
-                    public_key=self.config["langfuse_public_key"],
-                    secret_key=self.config["langfuse_secret_key"],
-                    host=self.config["langfuse_host"]
-                )
-            except Exception as e:
-                print(f"Failed to initialize Langfuse: {e}")
-                self.enabled = False
+                public_key = self.config.get("langfuse_public_key", "")
+                secret_key = self.config.get("langfuse_secret_key", "")
+                if public_key and secret_key:
+                    self.client = Langfuse(
+                        public_key=public_key,
+                        secret_key=secret_key,
+                        host=self.config.get("langfuse_host", "https://cloud.langfuse.com")
+                    )
+                    # Verify client has trace method (for API compatibility)
+                    if not hasattr(self.client, 'trace'):
+                        logger.warning("Langfuse client does not have 'trace' method. Disabling Langfuse logging.")
+                        self.client = None
+            except (ValueError, AttributeError, ConnectionError) as e:
+                logger.warning(f"Failed to initialize Langfuse client: {e}. Disabling Langfuse logging.")
                 self.client = None
-        else:
-            self.client = None
+            except Exception as e:
+                # Catch any other unexpected exceptions during initialization
+                logger.warning(f"Unexpected error initializing Langfuse client: {e}. Disabling Langfuse logging.")
+                self.client = None
 
         # Current trace and span tracking
         self.current_trace = None
@@ -77,7 +83,7 @@ class LoggingManager:
         Returns:
             Trace object or None if disabled
         """
-        if not self.enabled:
+        if not self.client:
             return None
 
         self.game_id = game_id
@@ -96,8 +102,12 @@ class LoggingManager:
                 tags=["cpr_game", "multi_agent", "llm"]
             )
             return self.current_trace
+        except (AttributeError, ValueError, ConnectionError) as e:
+            logger.error(f"Error starting game trace: {e}", exc_info=True)
+            return None
         except Exception as e:
-            print(f"Error starting game trace: {e}")
+            # Catch any other unexpected exceptions
+            logger.error(f"Unexpected error starting game trace: {e}", exc_info=True)
             return None
 
     def start_round_span(self, round_num: int, game_state: Dict) -> Optional[Any]:
@@ -110,7 +120,7 @@ class LoggingManager:
         Returns:
             Span object or None if disabled
         """
-        if not self.enabled or self.current_trace is None:
+        if not self.client or self.current_trace is None:
             return None
 
         try:
@@ -123,8 +133,12 @@ class LoggingManager:
                 }
             )
             return self.current_round_span
+        except (AttributeError, ValueError, ConnectionError) as e:
+            logger.error(f"Error starting round span: {e}", exc_info=True)
+            return None
         except Exception as e:
-            print(f"Error starting round span: {e}")
+            # Catch any other unexpected exceptions
+            logger.error(f"Unexpected error starting round span: {e}", exc_info=True)
             return None
 
     def log_generation(
@@ -146,7 +160,7 @@ class LoggingManager:
             reasoning: Extracted reasoning text
             metadata: Additional metadata
         """
-        if not self.enabled or self.current_trace is None:
+        if not self.client or self.current_trace is None:
             return
 
         try:
@@ -177,8 +191,11 @@ class LoggingManager:
                 "reasoning": reasoning,
             })
 
+        except (AttributeError, ValueError, ConnectionError) as e:
+            logger.error(f"Error logging generation: {e}", exc_info=True)
         except Exception as e:
-            print(f"Error logging generation: {e}")
+            # Catch any other unexpected exceptions
+            logger.error(f"Unexpected error logging generation: {e}", exc_info=True)
 
     def log_round_metrics(self, round_num: int, metrics: Dict):
         """Log metrics for a completed round.
@@ -187,7 +204,7 @@ class LoggingManager:
             round_num: Round number
             metrics: Dictionary of metric values
         """
-        if not self.enabled or self.current_trace is None:
+        if not self.client or self.current_trace is None:
             return
 
         try:
@@ -203,19 +220,22 @@ class LoggingManager:
             metrics["round"] = round_num
             self.round_metrics.append(metrics)
 
+        except (AttributeError, ValueError, ConnectionError) as e:
+            logger.error(f"Error logging round metrics: {e}", exc_info=True)
         except Exception as e:
-            print(f"Error logging round metrics: {e}")
+            # Catch any other unexpected exceptions
+            logger.error(f"Unexpected error logging round metrics: {e}", exc_info=True)
 
     def end_round_span(self):
         """End the current round span."""
-        if not self.enabled or self.current_round_span is None:
+        if not self.client or self.current_round_span is None:
             return
 
         try:
             # Span automatically ends when context exits
             self.current_round_span = None
         except Exception as e:
-            print(f"Error ending round span: {e}")
+            logger.error(f"Error ending round span: {e}", exc_info=True)
 
     def end_game_trace(self, summary: Dict):
         """Finalize game trace with summary metrics.
@@ -223,7 +243,7 @@ class LoggingManager:
         Args:
             summary: Game summary statistics
         """
-        if not self.enabled or self.current_trace is None:
+        if not self.client or self.current_trace is None:
             return
 
         try:
@@ -258,8 +278,11 @@ class LoggingManager:
             if self.client:
                 self.client.flush()
 
+        except (AttributeError, ValueError, ConnectionError) as e:
+            logger.error(f"Error ending game trace: {e}", exc_info=True)
         except Exception as e:
-            print(f"Error ending game trace: {e}")
+            # Catch any other unexpected exceptions
+            logger.error(f"Unexpected error ending game trace: {e}", exc_info=True)
         finally:
             self.current_trace = None
             self.game_id = None
@@ -290,11 +313,12 @@ class LoggingManager:
 
     def __del__(self):
         """Cleanup: flush any pending traces."""
-        if self.enabled and hasattr(self, 'client') and self.client:
+        if hasattr(self, 'client') and self.client:
             try:
                 self.client.flush()
-            except:
-                pass
+            except Exception as e:
+                # Log error but don't raise during cleanup (destructor)
+                logger.warning(f"Error flushing logs during cleanup: {e}", exc_info=True)
 
 
 class MockLoggingManager(LoggingManager):
@@ -306,7 +330,7 @@ class MockLoggingManager(LoggingManager):
     def __init__(self, config: Optional[Dict] = None):
         """Initialize mock manager."""
         self.config = config if config is not None else CONFIG
-        self.enabled = True  # Always "enabled" for mock
+        self.client = None  # Mock doesn't use Langfuse client
 
         # Mock storage
         self.traces = []

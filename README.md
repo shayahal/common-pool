@@ -101,7 +101,7 @@ Default: Resource doubles each round (regeneration_rate = 2.0)
 ### Reward Function
 
 ```python
-reward = extraction * extraction_value
+reward = extraction  # (value per unit is 1)
 
 if resource >= sustainability_threshold:
     reward += sustainability_bonus

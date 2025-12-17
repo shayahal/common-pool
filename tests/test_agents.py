@@ -38,7 +38,7 @@ class TestMockLLMAgent:
         """Test that act returns valid action in range."""
         action, reasoning = agent.act(observation)
 
-        assert isinstance(action, float)
+        assert isinstance(action, int)
         assert agent.min_extraction <= action <= agent.max_extraction
         assert isinstance(reasoning, str)
 
@@ -49,25 +49,40 @@ class TestMockLLMAgent:
         assert len(agent.action_history) == 1
         assert len(agent.reasoning_history) == 1
 
-    def test_persona_affects_behavior(self, observation):
+    def test_persona_affects_behavior(self, random_seed):
         """Test that different personas behave differently."""
         # Create agents with different personas
         selfish_agent = MockLLMAgent(0, "rational_selfish", CONFIG)
         coop_agent = MockLLMAgent(1, "cooperative", CONFIG)
 
+        # Use lower resource level so agents don't hit max_extraction cap
+        # Resource level 100: selfish extracts ~30, cooperative extracts ~5
+        observation = {
+            "resource_level": np.array([100.0]),
+            "step": np.array([0]),
+            "my_recent_extractions": np.zeros(5),
+            "other_players_recent_extractions": np.zeros((1, 5)),
+            "my_cumulative_payoff": np.array([0.0]),
+            "other_players_cumulative_payoffs": np.array([0.0]),
+        }
+
         # Collect actions over multiple rounds
         selfish_actions = []
         coop_actions = []
 
-        for _ in range(10):
+        for _ in range(50):  # Sample size for statistical significance
             selfish_action, _ = selfish_agent.act(observation)
             coop_action, _ = coop_agent.act(observation)
 
             selfish_actions.append(selfish_action)
             coop_actions.append(coop_action)
 
-        # Selfish agent should extract more on average
-        assert np.mean(selfish_actions) > np.mean(coop_actions)
+        # Selfish agent should extract more on average (30% vs 5% of resource)
+        # With sample size and lower resource, this should hold despite randomness
+        selfish_mean = np.mean(selfish_actions)
+        coop_mean = np.mean(coop_actions)
+        # Check that selfish mean is significantly higher than cooperative mean
+        assert selfish_mean > coop_mean, f"Selfish mean ({selfish_mean:.2f}) should be > cooperative mean ({coop_mean:.2f})"
 
     def test_update_memory(self, agent, observation):
         """Test memory update."""

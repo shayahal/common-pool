@@ -1,0 +1,8 @@
+# Cursor Rules for Common Pool Resource Game
+
+## Virtual Environment
+
+- Always run the agent in the conda base environment
+- Activate the environment using: `/Users/shayyahal/miniconda3/bin/activate base`
+- Ensure all Python commands and scripts are executed within this activated environment
+

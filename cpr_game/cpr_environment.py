@@ -19,10 +19,9 @@ class CPREnvironment(gym.Env):
     shared resource pool that regenerates each round.
 
     The resource dynamics follow:
-        R(t+1) = max(R(t) * regeneration_rate - sum(extractions), min_resource)
+        R(t+1) = max(min(R(t) * regeneration_rate, max_fishes) - sum(extractions), min_resource)
 
-    Players receive rewards based on their extraction, with bonuses for
-    sustainability and penalties for depletion.
+    Players receive rewards based on their extraction.
     """
 
     metadata = {"render_modes": ["human", "dict"], "name": "CPREnvironment-v0"}
@@ -41,19 +40,20 @@ class CPREnvironment(gym.Env):
         # Game parameters
         self.n_players = self.config["n_players"]
         self.max_steps = self.config["max_steps"]
-        self.initial_resource = self.config["initial_resource"]
-        self.regeneration_rate = self.config["regeneration_rate"]
-        self.min_resource = self.config["min_resource"]
+        self.initial_resource = float(self.config["initial_resource"])
+        self.regeneration_rate = float(self.config["regeneration_rate"])
+        self.min_resource = float(self.config["min_resource"])
+        max_fishes_val = self.config.get("max_fishes", float("inf"))
+        self.max_fishes = float(max_fishes_val) if max_fishes_val != float("inf") else max_fishes_val
+        
+        # Reward parameters
+        self.sustainability_threshold = float(self.config.get("sustainability_threshold", self.n_players))
+        self.sustainability_bonus = float(self.config.get("sustainability_bonus", 0.0))
+        self.depletion_penalty = float(self.config.get("depletion_penalty", 0.0))
 
         # Action space
         self.min_extraction = self.config["min_extraction"]
         self.max_extraction = self.config["max_extraction"]
-
-        # Reward parameters
-        self.extraction_value = self.config["extraction_value"]
-        self.depletion_penalty = self.config["depletion_penalty"]
-        self.sustainability_bonus = self.config["sustainability_bonus"]
-        self.sustainability_threshold = self.config["sustainability_threshold"]
 
         # Define action and observation spaces
         # Action space: continuous extraction amount for each player
@@ -114,12 +114,12 @@ class CPREnvironment(gym.Env):
         super().reset(seed=seed)
 
         # Reset game state
-        self.current_resource = self.initial_resource
+        self.current_resource = float(self.initial_resource)
         self.current_step = 0
         self.extraction_history = []
         self.payoff_history = []
         self.player_cumulative_payoffs = np.zeros(self.n_players)
-        self.resource_history = [self.initial_resource]
+        self.resource_history = [float(self.initial_resource)]
         self.cooperation_history = []
         self.done = False
 
@@ -157,19 +157,25 @@ class CPREnvironment(gym.Env):
         # Calculate total extraction
         total_extraction = np.sum(actions)
 
+        # Store resource before step for reward calculation
+        resource_before_step = float(self.current_resource)
+
         # Update resource with regeneration and extraction
-        # R(t+1) = max(R(t) * regeneration_rate - sum(extractions), min_resource)
+        # R(t+1) = max(min(R(t) * regeneration_rate, max_fishes) - sum(extractions), min_resource)
         regenerated_resource = self.current_resource * self.regeneration_rate
+        # Cap regeneration at max_fishes (resource capacity limit)
+        if self.max_fishes != float("inf"):
+            regenerated_resource = min(regenerated_resource, self.max_fishes)
         self.current_resource = max(
             regenerated_resource - total_extraction,
             self.min_resource
         )
 
         # Store resource level
-        self.resource_history.append(self.current_resource)
+        self.resource_history.append(float(self.current_resource))
 
         # Calculate rewards
-        rewards = self._compute_rewards(actions)
+        rewards = self._compute_rewards(actions, resource_before_step)
 
         # Store rewards and update cumulative payoffs
         self.payoff_history.append(rewards.copy())
@@ -201,9 +207,9 @@ class CPREnvironment(gym.Env):
 
         # Build info dict
         info = {
-            "resource": self.current_resource,
+            "resource": float(self.current_resource),
             "step": self.current_step,
-            "total_extraction": total_extraction,
+            "total_extraction": float(total_extraction),
             "cooperation_index": cooperation,
             "cumulative_payoffs": self.player_cumulative_payoffs.copy(),
             "tragedy_occurred": self.current_resource <= self.min_resource,
@@ -211,38 +217,30 @@ class CPREnvironment(gym.Env):
 
         return observations, rewards, terminated, truncated, info
 
-    def _compute_rewards(self, actions: np.ndarray) -> np.ndarray:
+    def _compute_rewards(self, actions: np.ndarray, resource_before_step: float) -> np.ndarray:
         """Calculate rewards for each player based on their actions.
 
         Reward function:
-            reward_i = extraction_i * EXTRACTION_VALUE
-
-            if resource > SUSTAINABILITY_THRESHOLD:
-                reward_i += SUSTAINABILITY_BONUS
-
-            if resource <= MIN_RESOURCE:
-                reward_i += DEPLETION_PENALTY / N_PLAYERS
+            reward_i = extraction_i (value per unit is 1)
+            + sustainability_bonus if resource_after >= sustainability_threshold
 
         Args:
             actions: Array of player extractions
+            resource_before_step: Resource level before this step (for bonus calculation)
 
         Returns:
             Array of rewards (one per player)
         """
-        rewards = np.zeros(self.n_players)
+        # Base reward: extraction amount (value is 1 per unit)
+        # Convert to float to allow adding float bonuses
+        rewards = actions.astype(float).copy()
 
-        # Base reward: value of extraction
-        rewards = actions * self.extraction_value
-
-        # Sustainability bonus
+        # Sustainability bonus (based on resource AFTER step)
         if self.current_resource >= self.sustainability_threshold:
             rewards += self.sustainability_bonus
 
-        # Depletion penalty (shared equally)
-        if self.current_resource <= self.min_resource:
-            rewards += self.depletion_penalty / self.n_players
-
-        return rewards
+        # Convert rewards to int (round down any fractional parts)
+        return np.floor(rewards).astype(int)
 
     def _compute_cooperation_index(self) -> float:
         """Compute cooperation index for current state.
@@ -343,7 +341,6 @@ class CPREnvironment(gym.Env):
             output += f"CPR Game - Round {self.current_step}/{self.max_steps}\n"
             output += f"{'='*60}\n"
             output += f"Resource Level: {self.current_resource:.2f} / {self.initial_resource:.2f}\n"
-            output += f"Sustainability Threshold: {self.sustainability_threshold:.2f}\n"
 
             if len(self.extraction_history) > 0:
                 output += f"\nLast Round Extractions:\n"
@@ -362,10 +359,10 @@ class CPREnvironment(gym.Env):
 
         elif mode == "dict":
             return {
-                "resource": self.current_resource,
+                "resource": float(self.current_resource),
                 "step": self.current_step,
                 "max_steps": self.max_steps,
-                "resource_history": self.resource_history.copy(),
+                "resource_history": [float(r) for r in self.resource_history],
                 "extraction_history": [e.copy() for e in self.extraction_history],
                 "payoff_history": [p.copy() for p in self.payoff_history],
                 "cumulative_payoffs": self.player_cumulative_payoffs.copy(),
@@ -382,16 +379,21 @@ class CPREnvironment(gym.Env):
         Returns:
             Dict: Summary metrics
         """
+        from .utils import compute_sustainability_score
+        
+        sustainability_score = compute_sustainability_score(
+            self.resource_history,
+            self.sustainability_threshold
+        )
+        
         return {
             "total_rounds": self.current_step,
-            "final_resource_level": self.current_resource,
+            "final_resource_level": float(self.current_resource),
             "cumulative_payoffs": self.player_cumulative_payoffs.tolist(),
-            "tragedy_occurred": self.current_resource <= self.min_resource,
+            "sustainability_score": float(sustainability_score),
+            "tragedy_occurred": bool(self.current_resource <= self.min_resource),
             "avg_cooperation_index": np.mean(self.cooperation_history) if self.cooperation_history else 0.0,
             "gini_coefficient": compute_gini_coefficient(self.player_cumulative_payoffs),
-            "sustainability_score": sum(
-                1 for r in self.resource_history if r >= self.sustainability_threshold
-            ) / len(self.resource_history) if self.resource_history else 0.0,
             "total_extracted": sum(np.sum(e) for e in self.extraction_history),
             "avg_extraction_per_player": [
                 np.mean([e[i] for e in self.extraction_history])

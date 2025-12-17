@@ -6,33 +6,41 @@ Modify these constants to customize game behavior.
 
 import os
 from typing import Dict, List
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ============================================================================
 # Core Game Settings
 # ============================================================================
 
 N_PLAYERS: int = 2
-MAX_STEPS: int = 100
-INITIAL_RESOURCE: float = 1000.0
-REGENERATION_RATE: float = 2.0  # Resource doubles each round (before extraction)
-MIN_RESOURCE: float = 0.0  # Resource depletion threshold
+MAX_STEPS: int = 50
+INITIAL_RESOURCE: int = 100
+REGENERATION_RATE: int = 2  # Resource doubles each round (before extraction)
+SUSTAINABILITY_THRESHOLD: int = N_PLAYERS
+# MIN_RESOURCE is set to N_PLAYERS in CONFIG dict below
 
 # ============================================================================
 # Action Space
 # ============================================================================
 
-MIN_EXTRACTION: float = 0.0
-MAX_EXTRACTION: float = 100.0  # Maximum a player can extract per round
+MIN_EXTRACTION: int = 0
+MAX_EXTRACTION: int = 35  # Maximum a player can extract per round
 ACTION_TYPE: str = "continuous"
+
+# ============================================================================
+# Resource Capacity
+# ============================================================================
+
+MAX_FISHES: int = 100  # Maximum resource level at any given step (capacity cap)
 
 # ============================================================================
 # Reward Parameters
 # ============================================================================
 
-EXTRACTION_VALUE: float = 1.0  # Value per unit extracted
-DEPLETION_PENALTY: float = -1000.0  # Penalty when resource fully depleted
-SUSTAINABILITY_BONUS: float = 10.0  # Bonus for keeping resource above threshold
-SUSTAINABILITY_THRESHOLD: float = 500.0  # Resource level for sustainability bonus
+EXTRACTION_VALUE: int = 1  # Value per unit extracted
 
 # ============================================================================
 # Game Mechanics
@@ -52,13 +60,6 @@ LLM_TEMPERATURE: float = 0.7
 LLM_MAX_TOKENS: int = 500
 LLM_TIMEOUT: int = 30  # seconds
 
-# Agent Personas (first N_PLAYERS will be used)
-PLAYER_PERSONAS: List[str] = [
-    "rational_selfish",  # Player 0: Maximizes individual payoff
-    "cooperative",       # Player 1: Prioritizes group welfare
-    # Leave additional slots empty for neutral agents
-]
-
 # Persona System Prompts
 PERSONA_PROMPTS: Dict[str, str] = {
     "rational_selfish": """You are a rational, self-interested player who aims to maximize your own payoff.
@@ -69,9 +70,30 @@ You may cooperate if it serves your long-term interests, but your primary goal i
 You aim to maintain the resource for long-term benefit of all players.
 You prefer fair distribution and will try to establish trust and cooperation patterns.""",
 
+    "aggressive": """You are an aggressive player who prioritizes immediate gains.
+You tend to extract as much as possible each round, focusing on short-term profits.
+You are less concerned about long-term resource sustainability.""",
+
+    "conservative": """You are a conservative player who is risk-averse.
+You prefer to extract small amounts to ensure the resource remains available.
+You prioritize stability and avoiding resource depletion over maximizing gains.""",
+
+    "opportunistic": """You are an opportunistic player who adapts your strategy based on others' actions.
+You observe what other players do and adjust your extraction accordingly.
+You may cooperate when others cooperate, but exploit when others are aggressive.""",
+
+    "altruistic": """You are an altruistic player who prioritizes the welfare of others.
+You are willing to extract less to ensure others can benefit from the resource.
+You value fairness and equitable distribution above personal gain.""",
+
+    "null": "",  # Null persona with no characteristics
+
     "": """You are a player in a resource management game.
 Make decisions that you think are best given the situation."""
 }
+
+# Agent Personas (first N_PLAYERS will be used)
+PLAYER_PERSONAS: list[str] = list(PERSONA_PROMPTS.keys()) 
 
 # Prompt Engineering
 INCLUDE_HISTORY_ROUNDS: int = 5  # How many past rounds to include in context
@@ -114,7 +136,6 @@ GAME_METRICS: List[str] = [
     "tragedy_occurred",  # Boolean: did resource deplete?
     "avg_cooperation_index",
     "gini_coefficient",  # Payoff inequality measure
-    "sustainability_score",  # % of rounds above threshold
 ]
 
 # ============================================================================
@@ -162,15 +183,13 @@ CONFIG: Dict = {
     "max_steps": MAX_STEPS,
     "initial_resource": INITIAL_RESOURCE,
     "regeneration_rate": REGENERATION_RATE,
-    "min_resource": MIN_RESOURCE,
+    "min_resource": float(N_PLAYERS),  # MIN_RESOURCE = N_PLAYERS
     "min_extraction": MIN_EXTRACTION,
     "max_extraction": MAX_EXTRACTION,
     "action_type": ACTION_TYPE,
+    "max_fishes": MAX_FISHES,  # Maximum resource capacity
 
-    # Rewards
-    "extraction_value": EXTRACTION_VALUE,
-    "depletion_penalty": DEPLETION_PENALTY,
-    "sustainability_bonus": SUSTAINABILITY_BONUS,
+    # Rewards (extraction value is always 1)
     "sustainability_threshold": SUSTAINABILITY_THRESHOLD,
 
     # Game mechanics

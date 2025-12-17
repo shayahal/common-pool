@@ -5,7 +5,9 @@ and LLM reasoning in an interactive dashboard.
 """
 
 from typing import Dict, List, Optional
+import uuid
 import streamlit as st
+from streamlit.errors import StreamlitDuplicateElementKey
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
@@ -27,6 +29,12 @@ class Dashboard:
             config: Configuration dictionary
         """
         self.config = config if config is not None else CONFIG
+        
+        # Unique identifier for this dashboard instance
+        # Use a more unique ID that includes timestamp to avoid conflicts
+        if not hasattr(self, 'dashboard_id'):
+            import time
+            self.dashboard_id = f"{str(uuid.uuid4())[:8]}_{int(time.time() * 1000) % 100000}"
 
         # Display settings
         self.chart_height = self.config["chart_height"]
@@ -41,6 +49,17 @@ class Dashboard:
         self.payoff_history: List[np.ndarray] = []
         self.cooperation_history: List[float] = []
         self.reasoning_log: Dict[int, List[str]] = {}
+        
+        # Detailed run history for each step - use session state to persist across reruns
+        # Initialize session state if it doesn't exist
+        if "dashboard_run_history" not in st.session_state:
+            st.session_state.dashboard_run_history = []
+        # Always get reference from session state to ensure consistency
+        self.run_history = st.session_state.dashboard_run_history
+        
+        # Chart containers for updating without duplicate keys
+        # Will be initialized in update() method using session state
+        self._chart_containers = None
 
     def initialize(self, n_players: int):
         """Initialize dashboard layout.
@@ -59,42 +78,164 @@ class Dashboard:
         # Initialize reasoning log
         for i in range(n_players):
             self.reasoning_log[i] = []
+        
+        # Reset run history for new game
+        if "dashboard_run_history" in st.session_state:
+            st.session_state.dashboard_run_history = []
+        self.run_history = st.session_state.dashboard_run_history
 
+    def _get_chart_containers(self):
+        """Get or create chart containers for this dashboard instance.
+        
+        Returns:
+            Dict[str, streamlit.container]: Dictionary of chart containers
+        """
+        # Use session state to store containers per dashboard instance
+        containers_key = f"dashboard_containers_{self.dashboard_id}"
+        
+        # Check if containers already exist in session state
+        if containers_key not in st.session_state:
+            # Create containers for each chart type
+            st.session_state[containers_key] = {
+                "resource": st.empty(),
+                "extraction": st.empty(),
+                "payoff": st.empty(),
+                "cooperation": st.empty(),
+                "bar_race": st.empty(),
+            }
+        
+        return st.session_state[containers_key]
+    
     def update(self, game_state: Dict):
         """Update dashboard with new game state.
 
         Args:
             game_state: Current game state dictionary
         """
+        # Get or create chart containers
+        self._chart_containers = self._get_chart_containers()
+        
+        # Reset radio button creation flag at start of each update
+        # This ensures it can be created in new Streamlit executions
+        # but only once per execution even if update() is called multiple times
+        if hasattr(self, '_radio_created'):
+            # Check if this is a new Streamlit execution by checking session state
+            # If the key doesn't exist in session state, it's a new execution
+            view_mode_key = f"cpr_history_view_mode_{self.dashboard_id}"
+            if view_mode_key not in st.session_state:
+                self._radio_created = False
+        
         # Extract data
         self.resource_history = game_state.get("resource_history", [])
         self.extraction_history = game_state.get("extraction_history", [])
         self.payoff_history = game_state.get("payoff_history", [])
         self.cooperation_history = game_state.get("cooperation_history", [])
+        
+        # Update run history with new round data
+        # Note: resource_history[0] is initial resource, resource_history[1] is after round 1, etc.
+        # extraction_history[0] is round 1 extractions, extraction_history[1] is round 2, etc.
+        
+        # Ensure we're working with the latest session state
+        self.run_history = st.session_state.dashboard_run_history
+        
+        if len(self.extraction_history) > len(self.run_history):
+            # New round data available - process all missing rounds
+            while len(self.extraction_history) > len(self.run_history):
+                round_num = len(self.run_history)  # 0-indexed round number
+                
+                # Get extractions and payoffs for this round
+                if round_num < len(self.extraction_history):
+                    extractions = self.extraction_history[round_num]
+                    # Handle both list and numpy array
+                    if isinstance(extractions, np.ndarray):
+                        extractions = extractions.tolist()
+                    elif isinstance(extractions, list):
+                        # Already a list, ensure it's a proper list
+                        extractions = list(extractions)
+                    else:
+                        # Try to convert if iterable
+                        extractions = list(extractions) if hasattr(extractions, '__iter__') else []
+                else:
+                    extractions = []
+                
+                if round_num < len(self.payoff_history):
+                    payoffs = self.payoff_history[round_num]
+                    if isinstance(payoffs, np.ndarray):
+                        payoffs = payoffs.tolist()
+                    elif isinstance(payoffs, list):
+                        payoffs = list(payoffs)
+                    else:
+                        payoffs = list(payoffs) if hasattr(payoffs, '__iter__') else []
+                else:
+                    payoffs = []
+                
+                # Resource: history[0] is initial, history[1] is after round 1
+                # So for round 0 (first round), before=history[0], after=history[1]
+                resource_before = self.resource_history[round_num] if round_num < len(self.resource_history) else 0.0
+                resource_after = self.resource_history[round_num + 1] if (round_num + 1) < len(self.resource_history) else resource_before
+                
+                # Cooperation index
+                cooperation = self.cooperation_history[round_num] if round_num < len(self.cooperation_history) else 0.0
+                
+                # Get reasoning for this round if available
+                round_reasoning = {}
+                for player_id in self.reasoning_log:
+                    if len(self.reasoning_log[player_id]) > round_num:
+                        round_reasoning[player_id] = self.reasoning_log[player_id][round_num]
+                
+                round_data = {
+                    "round": round_num + 1,  # 1-indexed for display
+                    "resource_before": resource_before,
+                    "resource_after": resource_after,
+                    "extractions": extractions,
+                    "payoffs": payoffs,
+                    "cooperation_index": cooperation,
+                    "reasoning": round_reasoning,
+                }
+                # Append directly to session state list (they reference the same object)
+                st.session_state.dashboard_run_history.append(round_data)
+            
+            # Re-sync reference to ensure we're using the latest
+            self.run_history = st.session_state.dashboard_run_history
 
         # Header metrics
         self._render_header(game_state)
 
-        # Charts
-        col1, col2 = st.columns(2)
+        # Create tabs for different views
+        tab1, tab2 = st.tabs(["📊 Charts & Metrics", "💭 Reasoning Log"])
 
-        with col1:
-            if self.config["plots"]["resource_over_time"]:
-                self._render_resource_chart()
+        with tab1:
+            # Charts
+            col1, col2 = st.columns(2)
 
-            if self.config["plots"]["cooperation_index"]:
-                self._render_cooperation_chart()
+            with col1:
+                if self.config["plots"]["resource_over_time"]:
+                    self._render_resource_chart(container=self._chart_containers.get("resource") if self._chart_containers else None)
 
-        with col2:
-            if self.config["plots"]["individual_extractions"]:
-                self._render_extraction_chart()
+                if self.config["plots"]["cooperation_index"]:
+                    self._render_cooperation_chart(container=self._chart_containers.get("cooperation") if self._chart_containers else None)
 
-            if self.config["plots"]["cumulative_payoffs"]:
-                self._render_payoff_chart()
+            with col2:
+                if self.config["plots"]["individual_extractions"]:
+                    self._render_extraction_chart(container=self._chart_containers.get("extraction") if self._chart_containers else None)
 
-        # Reasoning log
-        if self.config["plots"]["reasoning_log"]:
-            self._render_reasoning_log()
+                if self.config["plots"]["cumulative_payoffs"]:
+                    self._render_payoff_chart(container=self._chart_containers.get("payoff") if self._chart_containers else None)
+            
+            # Bar chart race for cumulative payoffs
+            self._render_bar_chart_race(container=self._chart_containers.get("bar_race") if self._chart_containers else None)
+            
+            # Show summary if game is done
+            if game_state.get("done", False):
+                summary = self._calculate_summary(game_state)
+                self.show_summary(summary)
+
+        with tab2:
+            # Reasoning log
+            if self.config["plots"]["reasoning_log"]:
+                self._render_reasoning_log()
+            else:
+                st.info("Reasoning log is disabled in configuration.")
 
     def _render_header(self, game_state: Dict):
         """Render header with key metrics.
@@ -140,13 +281,20 @@ class Dashboard:
             )
 
         with cols[2]:
-            threshold = self.config["sustainability_threshold"]
-            pct = (current_resource / threshold * 100) if threshold > 0 else 0
-            st.metric(
-                "Sustainability",
-                f"{pct:.1f}%",
-                delta=None
-            )
+            threshold = self.config.get("sustainability_threshold", 0)
+            if threshold > 0:
+                pct = (current_resource / threshold * 100)
+                st.metric(
+                    "Sustainability",
+                    f"{pct:.1f}%",
+                    delta=None
+                )
+            else:
+                st.metric(
+                    "Sustainability",
+                    "N/A",
+                    delta=None
+                )
 
         with cols[3]:
             if len(self.cooperation_history) > 0:
@@ -167,10 +315,17 @@ class Dashboard:
 
         st.divider()
 
-    def _render_resource_chart(self):
-        """Render resource over time chart."""
+    def _render_resource_chart(self, container=None):
+        """Render resource over time chart.
+        
+        Args:
+            container: Optional Streamlit container to render into. If None, renders directly.
+        """
         if len(self.resource_history) == 0:
-            st.info("No data yet...")
+            if container:
+                container.info("No data yet...")
+            else:
+                st.info("No data yet...")
             return
 
         fig = go.Figure()
@@ -185,15 +340,16 @@ class Dashboard:
             marker=dict(size=6)
         ))
 
-        # Sustainability threshold
-        threshold = self.config["sustainability_threshold"]
-        fig.add_trace(go.Scatter(
-            x=[0, len(self.resource_history) - 1],
-            y=[threshold, threshold],
-            mode='lines',
-            name='Sustainability Threshold',
-            line=dict(color=self.threshold_color, width=2, dash='dash')
-        ))
+        # Sustainability threshold (if defined)
+        threshold = self.config.get("sustainability_threshold", 0)
+        if threshold > 0:
+            fig.add_trace(go.Scatter(
+                x=[0, len(self.resource_history) - 1],
+                y=[threshold, threshold],
+                mode='lines',
+                name='Sustainability Threshold',
+                line=dict(color=self.threshold_color, width=2, dash='dash')
+            ))
 
         fig.update_layout(
             title="Resource Level Over Time",
@@ -204,12 +360,23 @@ class Dashboard:
             hovermode='x unified'
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        # Use container if provided, otherwise render directly (for backward compatibility)
+        if container:
+            container.plotly_chart(fig, width='stretch', use_container_width=True)
+        else:
+            st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_resource_chart")
 
-    def _render_extraction_chart(self):
-        """Render player extractions over time."""
+    def _render_extraction_chart(self, container=None):
+        """Render player extractions over time.
+        
+        Args:
+            container: Optional Streamlit container to render into. If None, renders directly.
+        """
         if len(self.extraction_history) == 0:
-            st.info("No data yet...")
+            if container:
+                container.info("No data yet...")
+            else:
+                st.info("No data yet...")
             return
 
         fig = go.Figure()
@@ -238,12 +405,23 @@ class Dashboard:
             hovermode='x unified'
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        # Use container if provided, otherwise render directly (for backward compatibility)
+        if container:
+            container.plotly_chart(fig, width='stretch', use_container_width=True)
+        else:
+            st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_extraction_chart")
 
-    def _render_payoff_chart(self):
-        """Render cumulative payoffs over time."""
+    def _render_payoff_chart(self, container=None):
+        """Render cumulative payoffs as a bar chart showing final summary.
+        
+        Args:
+            container: Optional Streamlit container to render into. If None, renders directly.
+        """
         if len(self.payoff_history) == 0:
-            st.info("No data yet...")
+            if container:
+                container.info("No data yet...")
+            else:
+                st.info("No data yet...")
             return
 
         fig = go.Figure()
@@ -253,32 +431,48 @@ class Dashboard:
         cumulative = np.cumsum(payoffs, axis=0)
         n_players = cumulative.shape[1]
 
-        # One line per player
-        for i in range(n_players):
-            fig.add_trace(go.Scatter(
-                x=list(range(len(cumulative))),
-                y=cumulative[:, i],
-                mode='lines+markers',
-                name=f'Player {i}',
-                line=dict(color=self.player_colors[i % len(self.player_colors)], width=2),
-                marker=dict(size=5)
-            ))
+        # Get final cumulative payoffs (summary of all rounds)
+        final_cumulative = cumulative[-1, :] if len(cumulative) > 0 else np.zeros(n_players)
+        
+        # Create bar chart with one bar per player
+        player_names = [f'Player {i}' for i in range(n_players)]
+        colors = [self.player_colors[i % len(self.player_colors)] for i in range(n_players)]
+        
+        fig.add_trace(go.Bar(
+            x=player_names,
+            y=final_cumulative,
+            name='Cumulative Payoff',
+            marker_color=colors,
+            text=[f'{val:.1f}' for val in final_cumulative],
+            textposition='outside'
+        ))
 
         fig.update_layout(
-            title="Cumulative Payoffs Over Time",
-            xaxis_title="Round",
+            title="Cumulative Payoffs Summary (All Rounds)",
+            xaxis_title="Player",
             yaxis_title="Total Earnings",
             height=self.chart_height,
-            showlegend=True,
-            hovermode='x unified'
+            showlegend=False,
+            hovermode='x'
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        # Use container if provided, otherwise render directly (for backward compatibility)
+        if container:
+            container.plotly_chart(fig, width='stretch', use_container_width=True)
+        else:
+            st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_payoff_chart")
 
-    def _render_cooperation_chart(self):
-        """Render cooperation index over time."""
+    def _render_cooperation_chart(self, container=None):
+        """Render cooperation index over time.
+        
+        Args:
+            container: Optional Streamlit container to render into. If None, renders directly.
+        """
         if len(self.cooperation_history) == 0:
-            st.info("No data yet...")
+            if container:
+                container.info("No data yet...")
+            else:
+                st.info("No data yet...")
             return
 
         fig = go.Figure()
@@ -304,7 +498,11 @@ class Dashboard:
             hovermode='x unified'
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        # Use container if provided, otherwise render directly (for backward compatibility)
+        if container:
+            container.plotly_chart(fig, width='stretch', use_container_width=True)
+        else:
+            st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_cooperation_chart")
 
     def _render_reasoning_log(self):
         """Render LLM reasoning log."""
@@ -338,7 +536,347 @@ class Dashboard:
         if player_id not in self.reasoning_log:
             self.reasoning_log[player_id] = []
         self.reasoning_log[player_id].append(reasoning)
+    
+    def _render_run_history(self):
+        """Render detailed history of all rounds showing what each player did."""
+        st.markdown("## 📜 Run History")
+        
+        # Ensure we're using the latest session state
+        self.run_history = st.session_state.dashboard_run_history
+        
+        if len(self.run_history) == 0:
+            st.info("No history available yet. The game will populate this as it progresses.")
+            return
+        
+        # Show summary stats
+        n_rounds = len(self.run_history)
+        st.markdown(f"**Total Rounds:** {n_rounds}")
+        
+        # Option to view as table or detailed view
+        # Use a unique key that includes the dashboard_id to prevent duplicates
+        # when update() is called multiple times in the same execution
+        view_mode_key = f"cpr_history_view_mode_{self.dashboard_id}"
+        
+        # Initialize default value if not set
+        if view_mode_key not in st.session_state:
+            st.session_state[view_mode_key] = "Table View"
+        
+        # Get current value from session state
+        current_mode = st.session_state.get(view_mode_key, "Table View")
+        default_index = 0 if current_mode == "Table View" else 1
+        
+        # Only create the radio button once per Streamlit script execution
+        # Use an instance variable to track if we've created it in this execution
+        if not hasattr(self, '_radio_created'):
+            self._radio_created = False
+        
+        # Only create the radio button once per Streamlit script execution
+        # Check if we've already created it in this execution
+        if not self._radio_created:
+            try:
+                view_mode = st.radio(
+                    "View Mode",
+                    ["Table View", "Detailed View"],
+                    horizontal=True,
+                    key=view_mode_key,
+                    index=default_index
+                )
+                self._radio_created = True
+            except StreamlitDuplicateElementKey:
+                # Widget already exists (created in a previous call in same execution)
+                # Just get the value from session state
+                view_mode = st.session_state.get(view_mode_key, "Table View")
+                self._radio_created = True
+        else:
+            # Radio button already created, just get the value from session state
+            view_mode = st.session_state.get(view_mode_key, "Table View")
+        
+        if view_mode == "Table View":
+            self._render_history_table()
+        else:
+            self._render_history_detailed()
+    
+    def _render_history_table(self):
+        """Render history as a compact table."""
+        # Ensure we're using the latest session state
+        self.run_history = st.session_state.dashboard_run_history
+        
+        if len(self.run_history) == 0:
+            return
+        
+        # Build table data
+        table_data = []
+        first_round = self.run_history[0]
+        n_players = len(first_round.get("extractions", [])) if first_round.get("extractions") else 0
+        
+        if n_players == 0:
+            st.warning("No player data available in history.")
+            return
+        
+        for round_data in self.run_history:
+            extractions = round_data.get("extractions", [])
+            payoffs = round_data.get("payoffs", [])
+            
+            row = {
+                "Round": round_data["round"],
+                "Resource Before": f"{round_data['resource_before']:.2f}",
+                "Resource After": f"{round_data['resource_after']:.2f}",
+                "Cooperation": f"{round_data['cooperation_index']:.3f}",
+            }
+            
+            # Add player extractions
+            for i in range(n_players):
+                extraction = extractions[i] if i < len(extractions) else 0.0
+                payoff = payoffs[i] if i < len(payoffs) else 0.0
+                row[f"P{i} Extract"] = f"{extraction:.2f}"
+                row[f"P{i} Payoff"] = f"{payoff:.2f}"
+            
+            table_data.append(row)
+        
+        # Create DataFrame
+        df = pd.DataFrame(table_data)
+        
+        # Display with scrolling
+        st.dataframe(
+            df,
+            width='stretch',
+            height=min(400, 50 + len(df) * 35),
+            hide_index=True
+        )
+    
+    def _render_history_detailed(self):
+        """Render history with expandable sections for each round."""
+        # Ensure we're using the latest session state
+        self.run_history = st.session_state.dashboard_run_history
+        
+        if len(self.run_history) == 0:
+            return
+        
+        # Show most recent rounds first
+        reversed_history = list(reversed(self.run_history))
+        
+        # Limit display to last 50 rounds to avoid performance issues
+        display_history = reversed_history[:50]
+        
+        if len(self.run_history) > 50:
+            st.info(f"Showing last 50 rounds (out of {len(self.run_history)} total). Use Table View to see all rounds.")
+        
+        for round_data in display_history:
+            round_num = round_data["round"]
+            extractions = round_data.get("extractions", [])
+            payoffs = round_data.get("payoffs", [])
+            n_players = len(extractions) if extractions else 0
+            
+            if n_players == 0:
+                continue
+            
+            # Create expandable section
+            with st.expander(
+                f"Round {round_num} - Resource: {round_data['resource_before']:.2f} → {round_data['resource_after']:.2f} | "
+                f"Cooperation: {round_data['cooperation_index']:.3f}",
+                expanded=(round_data == display_history[0])  # Expand most recent
+            ):
+                # Resource info
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Resource Before", f"{round_data['resource_before']:.2f}")
+                with col2:
+                    st.metric("Resource After", f"{round_data['resource_after']:.2f}")
+                with col3:
+                    resource_change = round_data['resource_after'] - round_data['resource_before']
+                    st.metric("Resource Change", f"{resource_change:+.2f}")
+                
+                st.divider()
+                
+                # Player actions
+                st.markdown("#### Player Actions")
+                player_cols = st.columns(n_players)
+                
+                for i in range(n_players):
+                    with player_cols[i]:
+                        st.markdown(f"**Player {i}**")
+                        extraction = extractions[i] if i < len(extractions) else 0.0
+                        payoff = payoffs[i] if i < len(payoffs) else 0.0
+                        st.metric("Extraction", f"{extraction:.2f}")
+                        st.metric("Payoff", f"{payoff:.2f}")
+                        
+                        # Show reasoning if available
+                        if i in round_data.get("reasoning", {}):
+                            with st.expander("Reasoning"):
+                                st.write(round_data["reasoning"][i])
+                
+                # Summary stats
+                st.divider()
+                total_extraction = sum(extractions) if extractions else 0.0
+                total_payoff = sum(payoffs) if payoffs else 0.0
+                st.markdown(f"**Total Extraction:** {total_extraction:.2f} | **Total Payoff:** {total_payoff:.2f}")
 
+    def _calculate_summary(self, game_state: Dict) -> Dict:
+        """Calculate summary statistics from game state.
+        
+        Args:
+            game_state: Current game state dictionary
+            
+        Returns:
+            Dictionary with summary statistics
+        """
+        cumulative_payoffs = game_state.get("cumulative_payoffs", [])
+        if not cumulative_payoffs and len(self.payoff_history) > 0:
+            # Calculate cumulative payoffs from history
+            payoffs = np.array(self.payoff_history)
+            cumulative_payoffs = np.cumsum(payoffs, axis=0)
+            if len(cumulative_payoffs) > 0:
+                cumulative_payoffs = cumulative_payoffs[-1, :].tolist()
+            else:
+                cumulative_payoffs = []
+        
+        final_resource = game_state.get("resource", 0)
+        total_rounds = len(self.extraction_history)
+        avg_cooperation = np.mean(self.cooperation_history) if len(self.cooperation_history) > 0 else 0.0
+        
+        # Calculate Gini coefficient for payoff inequality
+        gini = 0.0
+        if len(cumulative_payoffs) > 1 and sum(cumulative_payoffs) > 0:
+            sorted_payoffs = sorted(cumulative_payoffs)
+            n = len(sorted_payoffs)
+            gini = (n + 1 - 2 * sum((n + 1 - i) * y for i, y in enumerate(sorted_payoffs, 1))) / (n * sum(sorted_payoffs))
+        
+        threshold = self.config.get("sustainability_threshold", 0)
+        sustainability_score = (final_resource / threshold) if threshold > 0 else 0.0
+        
+        return {
+            "total_rounds": total_rounds,
+            "final_resource_level": final_resource,
+            "tragedy_occurred": final_resource <= 0,
+            "avg_cooperation_index": avg_cooperation,
+            "gini_coefficient": gini,
+            "sustainability_score": sustainability_score,
+            "cumulative_payoffs": cumulative_payoffs,
+        }
+    
+    def _render_bar_chart_race(self, container=None):
+        """Render animated bar chart race showing cumulative payoffs over time.
+        
+        Args:
+            container: Optional Streamlit container to render into. If None, renders directly.
+        """
+        if len(self.payoff_history) == 0:
+            if container:
+                container.info("No data yet...")
+            return
+        
+        # Calculate cumulative payoffs over time
+        payoffs = np.array(self.payoff_history)
+        cumulative = np.cumsum(payoffs, axis=0)
+        n_players = cumulative.shape[1]
+        n_rounds = cumulative.shape[0]
+        
+        # Create data for animation - each frame is a round
+        frames = []
+        for round_num in range(n_rounds):
+            # Sort players by cumulative payoff for this round
+            round_payoffs = cumulative[round_num, :]
+            sorted_indices = np.argsort(round_payoffs)
+            
+            frame_data = go.Frame(
+                data=[
+                    go.Bar(
+                        x=[round_payoffs[i] for i in sorted_indices],
+                        y=[f"Player {i}" for i in sorted_indices],
+                        orientation='h',
+                        marker_color=[self.player_colors[i % len(self.player_colors)] for i in sorted_indices],
+                        text=[f"{round_payoffs[i]:.1f}" for i in sorted_indices],
+                        textposition='outside',
+                        name=f"Round {round_num + 1}"
+                    )
+                ],
+                name=f"round_{round_num}"
+            )
+            frames.append(frame_data)
+        
+        # Initial data (first round)
+        if n_rounds > 0:
+            initial_payoffs = cumulative[0, :]
+            sorted_indices = np.argsort(initial_payoffs)
+            initial_data = [
+                go.Bar(
+                    x=[initial_payoffs[i] for i in sorted_indices],
+                    y=[f"Player {i}" for i in sorted_indices],
+                    orientation='h',
+                    marker_color=[self.player_colors[i % len(self.player_colors)] for i in sorted_indices],
+                    text=[f"{initial_payoffs[i]:.1f}" for i in sorted_indices],
+                    textposition='outside',
+                )
+            ]
+        else:
+            initial_data = []
+        
+        # Create figure with animation
+        fig = go.Figure(
+            data=initial_data,
+            frames=frames
+        )
+        
+        # Add play button and slider
+        fig.update_layout(
+            title="Cumulative Payoffs Race Over Time",
+            xaxis_title="Cumulative Payoff",
+            yaxis_title="Player",
+            height=self.chart_height,
+            showlegend=False,
+            updatemenus=[{
+                "type": "buttons",
+                "buttons": [
+                    {
+                        "label": "Play",
+                        "method": "animate",
+                        "args": [None, {
+                            "frame": {"duration": 500, "redraw": True},
+                            "fromcurrent": True,
+                            "transition": {"duration": 300}
+                        }]
+                    },
+                    {
+                        "label": "Pause",
+                        "method": "animate",
+                        "args": [[None], {
+                            "frame": {"duration": 0, "redraw": False},
+                            "mode": "immediate",
+                            "transition": {"duration": 0}
+                        }]
+                    }
+                ]
+            }],
+            sliders=[{
+                "active": 0,
+                "steps": [
+                    {
+                        "args": [[f"round_{i}"], {
+                            "frame": {"duration": 300, "redraw": True},
+                            "mode": "immediate",
+                            "transition": {"duration": 300}
+                        }],
+                        "label": f"Round {i+1}",
+                        "method": "animate"
+                    }
+                    for i in range(n_rounds)
+                ],
+                "transition": {"duration": 300},
+                "x": 0.1,
+                "len": 0.9,
+                "xanchor": "left",
+                "y": 0,
+                "yanchor": "top",
+                "pad": {"b": 10, "t": 50}
+            }]
+        )
+        
+        # Use container if provided, otherwise render directly
+        if container:
+            container.plotly_chart(fig, width='stretch', use_container_width=True)
+        else:
+            st.plotly_chart(fig, width='stretch', key=f"{self.dashboard_id}_bar_race")
+    
     def show_summary(self, summary: Dict):
         """Display game summary statistics.
 
@@ -386,7 +924,7 @@ class Dashboard:
                 for i, payoff in enumerate(summary["cumulative_payoffs"])
             }
             df = pd.DataFrame(payoff_data)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width='stretch')
 
 
 def create_static_report(game_state: Dict, summary: Dict, output_path: str = "cpr_report.html"):
