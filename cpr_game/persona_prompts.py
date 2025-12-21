@@ -26,8 +26,6 @@ PERSONA_PROMPTS: Dict[str, str] = {
 
     "opportunistic": """Opportunistic. Adapts strategy based on others' actions. Cooperates when others cooperate, exploits when aggressive.""",
 
-    "altruistic": """Altruistic. Prioritizes others' welfare. Willing to extract less for others' benefit. Values fairness.""",
-
     "null": """Player in resource management game. Make best decisions given the situation."""
 }
 

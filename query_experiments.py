@@ -31,7 +31,7 @@ def query_experiments():
                 e.initial_resource,
                 e.regeneration_rate,
                 e.max_extraction,
-                e.max_fishes,
+                e.Max_fish,
                 e.number_of_games,
                 e.number_of_players_per_game,
                 COUNT(DISTINCT ep.player_index) as player_count,
@@ -41,7 +41,7 @@ def query_experiments():
             LEFT JOIN experiment_results er ON e.experiment_id = er.experiment_id
             GROUP BY e.experiment_id, e.name, e.status, e.created_at,
                      e.n_players, e.max_steps, e.initial_resource, e.regeneration_rate,
-                     e.max_extraction, e.max_fishes, e.number_of_games, e.number_of_players_per_game
+                     e.max_extraction, e.Max_fish, e.number_of_games, e.number_of_players_per_game
             ORDER BY e.created_at DESC
         """
         
@@ -54,7 +54,7 @@ def query_experiments():
         if results:
             for idx, row in enumerate(results, 1):
                 (exp_id, name, status, created_at, n_players, max_steps, 
-                 initial_resource, regen_rate, max_extraction, max_fishes,
+                 initial_resource, regen_rate, max_extraction, Max_fish,
                  number_of_games, players_per_game, player_count, game_count) = row
                 
                 # Format created_at
@@ -77,7 +77,7 @@ def query_experiments():
                 print(f"   ──────────────────────────────────────────────────────────────")
                 print(f"   Players: {player_count or 0:2d} in pool | {players_per_game:2d} per game | {game_count or 0:3d} games completed")
                 print(f"   Game Params: {max_steps:3d} max steps | {initial_resource:4d} init resource | {regen_rate:.1f}x regen")
-                print(f"              : {max_extraction:2d} max extraction | {max_fishes:4d} max capacity")
+                print(f"              : {max_extraction:2d} max extraction | {Max_fish:4d} max capacity")
         else:
             print("No experiments found")
     except Exception as e:
@@ -184,7 +184,7 @@ def cleanup_nan_results():
         query = """
             SELECT COUNT(*) 
             FROM experiment_results
-            WHERE winning_player_id IS NULL 
+            WHERE winning_player_uuid IS NULL 
                OR winning_payoff IS NULL 
                OR cumulative_payoff_sum IS NULL 
                OR total_rounds IS NULL 
@@ -203,7 +203,7 @@ def cleanup_nan_results():
         # Delete rows with NULL values
         delete_query = """
             DELETE FROM experiment_results
-            WHERE winning_player_id IS NULL 
+            WHERE winning_player_uuid IS NULL 
                OR winning_payoff IS NULL 
                OR cumulative_payoff_sum IS NULL 
                OR total_rounds IS NULL 
@@ -231,7 +231,7 @@ def query_experiment_results(experiment_id: str = None):
             SELECT 
                 experiment_id,
                 game_id,
-                winning_player_id,
+                winning_player_uuid,
                 winning_payoff,
                 cumulative_payoff_sum,
                 total_rounds,
@@ -246,7 +246,7 @@ def query_experiment_results(experiment_id: str = None):
         print(f"=" * 80)
         print(f"EXPERIMENT RESULTS: {experiment_id}")
         print("=" * 80)
-        columns = ['experiment_id', 'game_id', 'winning_player_id', 'winning_payoff', 
+        columns = ['experiment_id', 'game_id', 'winning_player_uuid', 'winning_payoff', 
                   'cumulative_payoff_sum', 'total_rounds', 'final_resource_level', 
                   'tragedy_occurred', 'timestamp']
     else:
@@ -254,7 +254,7 @@ def query_experiment_results(experiment_id: str = None):
             SELECT 
                 experiment_id,
                 game_id,
-                winning_player_id,
+                winning_player_uuid,
                 winning_payoff,
                 cumulative_payoff_sum,
                 total_rounds,
@@ -268,7 +268,7 @@ def query_experiment_results(experiment_id: str = None):
         print("=" * 80)
         print("ALL EXPERIMENT RESULTS")
         print("=" * 80)
-        columns = ['experiment_id', 'game_id', 'winning_player_id', 'winning_payoff', 
+        columns = ['experiment_id', 'game_id', 'winning_player_uuid', 'winning_payoff', 
                   'cumulative_payoff_sum', 'total_rounds', 'final_resource_level', 
                   'tragedy_occurred', 'timestamp']
     
@@ -285,8 +285,14 @@ def query_experiment_results(experiment_id: str = None):
             if col in df.columns:
                 df[col] = df[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) and x is not None else "N/A")
         
+        # Format text columns (winning_player_uuid)
+        if 'winning_player_uuid' in df.columns:
+            df['winning_player_uuid'] = df['winning_player_uuid'].apply(
+                lambda x: str(x)[:8] + "..." if pd.notna(x) and x is not None and len(str(x)) > 8 else ("N/A" if pd.isna(x) or x is None else str(x))
+            )
+        
         # Format integer columns
-        int_cols = ['winning_player_id', 'total_rounds']
+        int_cols = ['total_rounds']
         for col in int_cols:
             if col in df.columns:
                 df[col] = df[col].apply(lambda x: f"{int(x)}" if pd.notna(x) and x is not None else "N/A")
@@ -391,7 +397,7 @@ python query_experiments.py --sql "SELECT e.*, COUNT(ep.player_index) as player_
 # Get experiment statistics
 python query_experiments.py --sql "SELECT experiment_id, COUNT(game_id) as num_games, MIN(timestamp) as first_game, MAX(timestamp) as last_game FROM experiment_results GROUP BY experiment_id"
 
-# Query results with new columns (winning_player_id, winning_payoff, etc.)
+# Query results with new columns (winning_player_uuid, winning_payoff, etc.)
 python query_experiments.py --results <experiment_id>
 
 # Query tragedy rate by experiment

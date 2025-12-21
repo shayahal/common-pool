@@ -125,6 +125,11 @@ class GameRunner:
                     persona=persona,
                     config=self.config
                 )
+            
+            # Assign player UUID if available (for experiments)
+            player_uuids = self.config.get("player_uuids", [])
+            if i < len(player_uuids) and player_uuids[i]:
+                agent.player_uuid = player_uuids[i]
 
             self.agents.append(agent)
             logger.debug(f"Player {i}: {persona}")
@@ -339,6 +344,25 @@ class GameRunner:
 
         # Get summary statistics
         summary = self.env.get_summary_stats()
+
+        # Add total cost and per-player costs to summary if available from logger
+        if hasattr(self.logger, 'get_api_metrics_data'):
+            api_metrics = self.logger.get_api_metrics_data()
+            total_cost = sum(m.get("cost", 0) or 0 for m in api_metrics)
+            summary["total_cost"] = total_cost
+            
+            # Calculate cost per player
+            player_costs = {}
+            for metric in api_metrics:
+                player_id = metric.get("player_id")
+                if player_id is not None:
+                    cost = metric.get("cost", 0) or 0
+                    if player_id not in player_costs:
+                        player_costs[player_id] = 0.0
+                    player_costs[player_id] += cost
+            
+            summary["player_costs"] = player_costs
+            summary["api_metrics_data"] = api_metrics  # Store full API metrics for detailed analysis
 
         # End logging trace
         self.logger.end_game_trace(summary)

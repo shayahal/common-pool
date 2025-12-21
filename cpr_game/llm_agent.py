@@ -7,6 +7,7 @@ game state, history, and persona-based reasoning.
 from typing import Dict, List, Optional, Tuple
 import time
 import numpy as np
+import random
 from openai import OpenAI
 from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError, AuthenticationError
 from pydantic import BaseModel, Field, ValidationError
@@ -155,37 +156,68 @@ class LLMAgent:
             "error": None,
         }
         
-        try:
-            logger.debug(f"Player {self.player_id}: Making API call to {self.llm_model}")
-            
-            # Use LangChain structured output
-            # Enable prompt caching for system message (static content, cached after first round)
-            # OpenAI's cache_control can be set via additional_kwargs on the message
-            # Note: This requires OpenAI API version that supports caching (gpt-3.5-turbo, gpt-4, etc.)
+        # Retry logic with exponential backoff for rate limits
+        max_retries = 5
+        base_delay = 1.0  # Start with 1 second
+        max_delay = 60.0  # Cap at 60 seconds
+        structured_response = None
+        
+        for attempt in range(max_retries):
             try:
-                system_message = SystemMessage(
-                    content=self.system_prompt,
-                    additional_kwargs={"cache_control": {"type": "ephemeral"}}
-                )
-            except (TypeError, ValueError):
-                # Fallback if cache_control not supported in this LangChain version
-                # System message will still be cached by OpenAI if model supports it
-                system_message = SystemMessage(content=self.system_prompt)
-            
-            messages = [
-                system_message,
-                HumanMessage(content=prompt)
-            ]
-            
-            # Use LangChain callback to get token usage
-            from langchain_community.callbacks import get_openai_callback
-            with get_openai_callback() as cb:
-                structured_response = self.llm.invoke(messages)
-                api_metrics["prompt_tokens"] = cb.prompt_tokens
-                api_metrics["completion_tokens"] = cb.completion_tokens
-                api_metrics["total_tokens"] = cb.total_tokens
-            
-            # Extract reasoning and action from structured response
+                logger.debug(f"Player {self.player_id}: Making API call to {self.llm_model} (attempt {attempt + 1}/{max_retries})")
+                
+                # Use LangChain structured output
+                # Enable prompt caching for system message (static content, cached after first round)
+                # OpenAI's cache_control can be set via additional_kwargs on the message
+                # Note: This requires OpenAI API version that supports caching (gpt-3.5-turbo, gpt-4, etc.)
+                try:
+                    system_message = SystemMessage(
+                        content=self.system_prompt,
+                        additional_kwargs={"cache_control": {"type": "ephemeral"}}
+                    )
+                except (TypeError, ValueError):
+                    # Fallback if cache_control not supported in this LangChain version
+                    # System message will still be cached by OpenAI if model supports it
+                    system_message = SystemMessage(content=self.system_prompt)
+                
+                messages = [
+                    system_message,
+                    HumanMessage(content=prompt)
+                ]
+                
+                # Use LangChain callback to get token usage
+                from langchain_community.callbacks import get_openai_callback
+                with get_openai_callback() as cb:
+                    structured_response = self.llm.invoke(messages)
+                    api_metrics["prompt_tokens"] = cb.prompt_tokens
+                    api_metrics["completion_tokens"] = cb.completion_tokens
+                    api_metrics["total_tokens"] = cb.total_tokens
+                
+                # Success - break out of retry loop
+                break
+                
+            except RateLimitError as e:
+                if attempt < max_retries - 1:
+                    # Calculate exponential backoff with jitter
+                    delay = min(base_delay * (2 ** attempt), max_delay)
+                    jitter = random.uniform(0, delay * 0.1)  # Add up to 10% jitter
+                    total_delay = delay + jitter
+                    
+                    logger.warning(
+                        f"Player {self.player_id}: Rate limit hit (attempt {attempt + 1}/{max_retries}). "
+                        f"Retrying in {total_delay:.2f}s..."
+                    )
+                    time.sleep(total_delay)
+                    continue
+                else:
+                    # Max retries reached, re-raise the error
+                    logger.error(
+                        f"Player {self.player_id}: Rate limit error after {max_retries} attempts"
+                    )
+                    raise
+        
+        # Extract reasoning and action from structured response (after successful API call)
+        try:
             reasoning = structured_response.reasoning
             action = structured_response.action
             
@@ -219,7 +251,7 @@ class LLMAgent:
                 f"Latency: {api_metrics['latency']:.2f}s"
             )
 
-        except (APIError, APIConnectionError, RateLimitError, APITimeoutError, AuthenticationError) as e:
+        except (APIError, APIConnectionError, APITimeoutError, AuthenticationError) as e:
             api_metrics["latency"] = time.time() - start_time
             api_metrics["error"] = f"{type(e).__name__}: {str(e)}"
             

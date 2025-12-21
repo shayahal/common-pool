@@ -17,8 +17,8 @@ load_dotenv()
 # ============================================================================
 
 N_PLAYERS: int = 2
-MAX_STEPS: int = 50
-INITIAL_RESOURCE: int = 100
+MAX_STEPS: int = 20  # Default: 20
+INITIAL_RESOURCE: int = 1000  # Default: 1000
 REGENERATION_RATE: int = 2  # Resource doubles each round (before extraction)
 SUSTAINABILITY_THRESHOLD: int = N_PLAYERS
 # MIN_RESOURCE is set to N_PLAYERS in CONFIG dict below
@@ -35,7 +35,7 @@ ACTION_TYPE: str = "continuous"
 # Resource Capacity
 # ============================================================================
 
-MAX_FISHES: int = 100  # Maximum resource level at any given step (capacity cap)
+Max_fish: int = 1000  # Maximum resource level at any given step (capacity cap), renamed from MAX_FISHES
 
 # ============================================================================
 # Reward Parameters
@@ -161,7 +161,7 @@ CONFIG: Dict = {
     "min_extraction": MIN_EXTRACTION,
     "max_extraction": MAX_EXTRACTION,
     "action_type": ACTION_TYPE,
-    "max_fishes": MAX_FISHES,  # Maximum resource capacity
+    "max_fishes": Max_fish,  # Maximum resource capacity (kept as max_fishes for backward compatibility in code)
 
     # Rewards (extraction value is always 1)
     "sustainability_threshold": SUSTAINABILITY_THRESHOLD,

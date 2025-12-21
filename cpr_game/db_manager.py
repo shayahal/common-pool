@@ -8,7 +8,9 @@ from typing import Dict, List, Optional
 import duckdb
 from pathlib import Path
 import json
+import uuid
 from datetime import datetime
+import time
 from .logger_setup import get_logger
 
 logger = get_logger(__name__)
@@ -19,12 +21,15 @@ class DatabaseManager:
     
     Creates and maintains a database table to store per-player game results
     including game_id, player_id, persona, model, and total_reward.
+    
+    Supports both read-only and read-write connections for concurrent access.
     """
 
     def __init__(
         self,
         db_path: Optional[str] = None,
-        enabled: bool = True
+        enabled: bool = True,
+        access_mode: str = 'READ_WRITE'
     ):
         """Initialize database manager.
         
@@ -32,30 +37,46 @@ class DatabaseManager:
             db_path: Path to DuckDB database file. If None, uses default:
                      data/game_results.duckdb
             enabled: Whether database saving is enabled (default: True)
+            access_mode: Connection access mode - 'READ_ONLY' or 'READ_WRITE' (default: 'READ_WRITE')
         """
         self.enabled = enabled
+        self.access_mode = access_mode
         
         if not self.enabled:
             logger.info("Database manager is disabled")
             self.conn = None
+            self.read_only_conn = None
+            self.db_path = None
             return
         
         # Set default database path
         if db_path is None:
             db_path = "data/game_results.duckdb"
         
-        # Ensure parent directory exists
-        db_file = Path(db_path)
-        db_file.parent.mkdir(parents=True, exist_ok=True)
+        self.db_path = db_path
+        
+        # Ensure parent directory exists (only for write mode)
+        if access_mode == 'READ_WRITE':
+            db_file = Path(db_path)
+            db_file.parent.mkdir(parents=True, exist_ok=True)
         
         # Connect to DuckDB
         try:
-            self.conn = duckdb.connect(db_path)
-            self._create_table()
-            logger.info(f"Database manager initialized: {db_path}")
+            # Convert access_mode to read_only boolean
+            read_only = (access_mode == 'READ_ONLY')
+            self.conn = duckdb.connect(db_path, read_only=read_only)
+            self.read_only_conn = None  # Lazy initialization for read-only connection
+            
+            # Only create tables if in write mode
+            if not read_only:
+                self._create_table()
+                logger.info(f"Database manager initialized (READ_WRITE): {db_path}")
+            else:
+                logger.info(f"Database manager initialized (READ_ONLY): {db_path}")
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}", exc_info=True)
             self.conn = None
+            self.read_only_conn = None
             self.enabled = False
 
     def _create_table(self):
@@ -68,6 +89,7 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS game_results (
                     game_id TEXT NOT NULL,
                     player_id INTEGER NOT NULL,
+                    player_uuid TEXT,
                     persona TEXT NOT NULL,
                     model TEXT NOT NULL,
                     total_reward DOUBLE NOT NULL,
@@ -88,6 +110,25 @@ class DatabaseManager:
             except Exception:
                 pass  # Column might already exist or error is expected
             
+            try:
+                self.conn.execute("ALTER TABLE game_results ADD COLUMN IF NOT EXISTS player_uuid TEXT")
+            except Exception:
+                pass  # Column might already exist or error is expected
+            
+            # Check if experiments table exists and what columns it has
+            table_exists = False
+            has_max_fishes = False
+            has_Max_fish = False
+            try:
+                columns = self.conn.execute("DESCRIBE experiments").fetchall()
+                column_names = [col[0] for col in columns]
+                table_exists = True
+                has_max_fishes = "max_fishes" in column_names
+                has_Max_fish = "Max_fish" in column_names
+            except Exception:
+                # Table doesn't exist yet
+                pass
+            
             # Create experiment tables
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS experiments (
@@ -100,11 +141,38 @@ class DatabaseManager:
                     initial_resource INTEGER NOT NULL,
                     regeneration_rate DOUBLE NOT NULL,
                     max_extraction INTEGER NOT NULL,
-                    max_fishes INTEGER NOT NULL,
+                    Max_fish INTEGER NOT NULL,
                     number_of_games INTEGER NOT NULL,
                     number_of_players_per_game INTEGER NOT NULL
                 )
             """)
+            
+            # Migration: Handle max_fishes -> Max_fish rename if table already exists
+            if table_exists:
+                try:
+                    # Re-check columns after CREATE TABLE (in case it was just created)
+                    columns = self.conn.execute("DESCRIBE experiments").fetchall()
+                    column_names = [col[0] for col in columns]
+                    has_max_fishes = "max_fishes" in column_names
+                    has_Max_fish = "Max_fish" in column_names
+                    
+                    if has_max_fishes and not has_Max_fish:
+                        logger.info("Migrating: adding Max_fish column and copying data from max_fishes")
+                        # Add new column
+                        self.conn.execute("ALTER TABLE experiments ADD COLUMN Max_fish INTEGER")
+                        # Copy data
+                        self.conn.execute("UPDATE experiments SET Max_fish = max_fishes")
+                        # Drop old column
+                        self.conn.execute("ALTER TABLE experiments DROP COLUMN max_fishes")
+                        logger.info("Migration complete: max_fishes renamed to Max_fish")
+                    elif has_max_fishes and has_Max_fish:
+                        # Both exist - copy data if needed and drop old column
+                        logger.info("Migrating: copying max_fishes to Max_fish and dropping old column")
+                        self.conn.execute("UPDATE experiments SET Max_fish = max_fishes WHERE Max_fish IS NULL OR Max_fish = 0")
+                        self.conn.execute("ALTER TABLE experiments DROP COLUMN max_fishes")
+                except Exception as e:
+                    logger.warning(f"Migration warning: {e}")
+                    # Continue anyway - might be a duplicate column error or rename might have already happened
             
             # Migration: Check if we need to add parameter columns
             # Try to query one of the new columns to see if they exist
@@ -120,7 +188,7 @@ class DatabaseManager:
                     self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS initial_resource INTEGER")
                     self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS regeneration_rate DOUBLE")
                     self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS max_extraction INTEGER")
-                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS max_fishes INTEGER")
+                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS Max_fish INTEGER")
                     self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS number_of_games INTEGER")
                     self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS number_of_players_per_game INTEGER")
                     
@@ -141,7 +209,7 @@ class DatabaseManager:
                                             initial_resource = ?,
                                             regeneration_rate = ?,
                                             max_extraction = ?,
-                                            max_fishes = ?,
+                                            Max_fish = ?,
                                             number_of_games = ?,
                                             number_of_players_per_game = ?
                                         WHERE experiment_id = ?
@@ -151,7 +219,7 @@ class DatabaseManager:
                                         params.get("initial_resource"),
                                         params.get("regeneration_rate"),
                                         params.get("max_extraction"),
-                                        params.get("max_fishes"),
+                                        params.get("Max_fish") or params.get("max_fishes"),  # Support both names
                                         params.get("number_of_games"),
                                         params.get("number_of_players_per_game"),
                                         exp_id
@@ -170,12 +238,36 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS experiment_players (
                     experiment_id TEXT NOT NULL,
                     player_index INTEGER NOT NULL,
+                    player_uuid TEXT NOT NULL,
                     persona TEXT NOT NULL,
                     model TEXT NOT NULL,
                     PRIMARY KEY (experiment_id, player_index),
                     FOREIGN KEY (experiment_id) REFERENCES experiments(experiment_id)
                 )
             """)
+            
+            # Add player_uuid column if it doesn't exist (for migration)
+            try:
+                self.conn.execute("ALTER TABLE experiment_players ADD COLUMN IF NOT EXISTS player_uuid TEXT")
+                # Generate UUIDs for existing players that don't have them
+                # DuckDB doesn't have gen_random_uuid(), so we'll generate in Python
+                existing_players = self.conn.execute("""
+                    SELECT experiment_id, player_index 
+                    FROM experiment_players 
+                    WHERE player_uuid IS NULL OR player_uuid = ''
+                """).fetchall()
+                for exp_id, player_idx in existing_players:
+                    new_uuid = str(uuid.uuid4())
+                    self.conn.execute("""
+                        UPDATE experiment_players 
+                        SET player_uuid = ? 
+                        WHERE experiment_id = ? AND player_index = ?
+                    """, (new_uuid, exp_id, player_idx))
+                # Note: DuckDB doesn't support ALTER COLUMN SET NOT NULL directly,
+                # so we'll handle NULLs in application code for now
+            except Exception as e:
+                logger.debug(f"Migration note (may be expected): {e}")
+                pass  # Column might already exist or error is expected
             
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS experiment_results (
@@ -188,11 +280,41 @@ class DatabaseManager:
                 )
             """)
             
+            # Create table to store individual player results per game
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS experiment_game_players (
+                    experiment_id TEXT NOT NULL,
+                    game_id TEXT NOT NULL,
+                    player_uuid TEXT NOT NULL,
+                    player_index INTEGER NOT NULL,
+                    persona TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    total_reward DOUBLE NOT NULL,
+                    timestamp TIMESTAMP NOT NULL,
+                    PRIMARY KEY (experiment_id, game_id, player_uuid),
+                    FOREIGN KEY (experiment_id) REFERENCES experiments(experiment_id)
+                )
+            """)
+            
             # Add new columns if they don't exist (for migration from old schema)
             try:
-                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS winning_player_id INTEGER")
+                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS winning_player_uuid TEXT")
             except Exception:
                 pass  # Column might already exist or error is expected
+            
+            # Migration: Rename winning_player_id to winning_player_uuid if old column exists
+            try:
+                columns = self.conn.execute("DESCRIBE experiment_results").fetchall()
+                column_names = [col[0] for col in columns]
+                if "winning_player_id" in column_names and "winning_player_uuid" not in column_names:
+                    logger.info("Migrating: adding winning_player_uuid column")
+                    # Add new column first
+                    self.conn.execute("ALTER TABLE experiment_results ADD COLUMN winning_player_uuid TEXT")
+                    # Data migration will happen in save_experiment_result based on selected_players
+                    # Old winning_player_id column will be kept for backward compatibility for now
+            except Exception as e:
+                logger.debug(f"Migration note (may be expected): {e}")
+                pass
             
             try:
                 self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS winning_payoff DOUBLE")
@@ -224,6 +346,83 @@ class DatabaseManager:
             logger.error(f"Failed to create table: {e}", exc_info=True)
             raise
 
+    def get_read_connection(self):
+        """Get or create read-only connection for queries.
+        
+        Returns:
+            DuckDB connection in READ_ONLY mode
+        """
+        if not self.enabled:
+            return None
+        
+        # If already in read-only mode, return main connection
+        if self.access_mode == 'READ_ONLY':
+            return self.conn
+        
+        # Otherwise, create a separate read-only connection
+        if self.read_only_conn is None:
+            try:
+                self.read_only_conn = duckdb.connect(self.db_path, read_only=True)
+                logger.debug("Created read-only connection for queries")
+            except Exception as e:
+                logger.warning(f"Failed to create read-only connection: {e}, falling back to main connection")
+                return self.conn
+        
+        return self.read_only_conn
+
+    def get_write_connection(self):
+        """Get write connection for INSERT/UPDATE/DELETE operations.
+        
+        Returns:
+            DuckDB connection in READ_WRITE mode
+        """
+        if not self.enabled:
+            return None
+        
+        if self.access_mode != 'READ_WRITE':
+            logger.error("Cannot get write connection - DatabaseManager is in READ_ONLY mode")
+            return None
+        
+        return self.conn
+
+    def _execute_write_with_retry(self, operation, max_retries=3, retry_delay=0.5):
+        """Execute a write operation with retry logic for lock conflicts.
+        
+        Args:
+            operation: Callable that performs the write operation
+            max_retries: Maximum number of retry attempts (default: 3)
+            retry_delay: Delay between retries in seconds (default: 0.5)
+            
+        Returns:
+            Result of the operation, or None if all retries failed
+        """
+        conn = self.get_write_connection()
+        if conn is None:
+            return None
+        
+        for attempt in range(max_retries):
+            try:
+                return operation(conn)
+            except Exception as e:
+                error_msg = str(e).lower()
+                # Check if it's a lock-related error
+                if 'lock' in error_msg or 'locked' in error_msg or 'conflicting' in error_msg:
+                    if attempt < max_retries - 1:
+                        logger.warning(
+                            f"Database locked, retrying in {retry_delay}s "
+                            f"(attempt {attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        logger.error(f"Database locked after {max_retries} attempts: {e}")
+                        raise
+                else:
+                    # Not a lock error, re-raise immediately
+                    raise
+        
+        return None
+
     def save_game_results(
         self,
         game_id: str,
@@ -243,7 +442,12 @@ class DatabaseManager:
             experiment_id: Optional experiment identifier
             timestamp: Optional timestamp (ISO format string or will use current time)
         """
-        if not self.enabled or self.conn is None:
+        if not self.enabled:
+            return
+        
+        conn = self.get_write_connection()
+        if conn is None:
+            logger.warning("Cannot save game results - no write connection available")
             return
         
         try:
@@ -263,6 +467,8 @@ class DatabaseManager:
                     continue
                 
                 player_id = getattr(agent, 'player_id', i)
+                # Get player UUID if available (for experiments)
+                player_uuid = getattr(agent, 'player_uuid', None)
                 persona = getattr(agent, 'persona', 'unknown')
                 
                 # Get model from agent or config
@@ -279,19 +485,20 @@ class DatabaseManager:
                     from datetime import datetime
                     timestamp = datetime.now().isoformat()
                 
-                rows.append((game_id, player_id, persona, model, total_reward, experiment_id, timestamp))
+                rows.append((game_id, player_id, player_uuid, persona, model, total_reward, experiment_id, timestamp))
             
             if not rows:
                 logger.warning(f"No valid player data to save for game {game_id}")
                 return
             
             # Insert data (using ON CONFLICT for idempotency)
-            self.conn.executemany("""
+            conn.executemany("""
                 INSERT INTO game_results 
-                (game_id, player_id, persona, model, total_reward, experiment_id, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (game_id, player_id, player_uuid, persona, model, total_reward, experiment_id, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (game_id, player_id) 
                 DO UPDATE SET 
+                    player_uuid = EXCLUDED.player_uuid,
                     persona = EXCLUDED.persona,
                     model = EXCLUDED.model,
                     total_reward = EXCLUDED.total_reward,
@@ -299,14 +506,16 @@ class DatabaseManager:
                     timestamp = EXCLUDED.timestamp
             """, rows)
             
-            self.conn.commit()
+            conn.commit()
             logger.info(f"Saved {len(rows)} player results for game {game_id}")
             
-            # Verify the save was successful
-            verify_count = self.conn.execute(
-                "SELECT COUNT(*) FROM game_results WHERE game_id = ?",
-                [game_id]
-            ).fetchone()[0]
+            # Verify the save was successful (use read connection for verification)
+            read_conn = self.get_read_connection()
+            if read_conn:
+                verify_count = read_conn.execute(
+                    "SELECT COUNT(*) FROM game_results WHERE game_id = ?",
+                    [game_id]
+                ).fetchone()[0]
             
             if verify_count != len(rows):
                 logger.warning(
@@ -328,6 +537,8 @@ class DatabaseManager:
     ) -> List[tuple]:
         """Execute a query and return results.
         
+        Uses read-only connection for SELECT queries to allow concurrent access.
+        
         Args:
             query: SQL query string
             parameters: Optional query parameters (list or tuple)
@@ -335,15 +546,20 @@ class DatabaseManager:
         Returns:
             List of result tuples
         """
-        if not self.enabled or self.conn is None:
-            logger.warning("Database is not enabled or not initialized")
+        if not self.enabled:
+            logger.warning("Database is not enabled")
+            return []
+        
+        conn = self.get_read_connection()
+        if conn is None:
+            logger.warning("Database is not initialized")
             return []
         
         try:
             if parameters:
-                result = self.conn.execute(query, parameters)
+                result = conn.execute(query, parameters)
             else:
-                result = self.conn.execute(query)
+                result = conn.execute(query)
             return result.fetchall()
         except Exception as e:
             logger.error(f"Query failed: {e}", exc_info=True)
@@ -366,11 +582,15 @@ class DatabaseManager:
         Returns:
             True if game exists in database, False otherwise
         """
-        if not self.enabled or self.conn is None:
+        if not self.enabled:
+            return False
+        
+        conn = self.get_read_connection()
+        if conn is None:
             return False
         
         try:
-            result = self.conn.execute(
+            result = conn.execute(
                 "SELECT COUNT(*) FROM game_results WHERE game_id = ?",
                 [game_id]
             ).fetchone()
@@ -422,7 +642,16 @@ class DatabaseManager:
             return self.query_results(query)
 
     def close(self):
-        """Close database connection."""
+        """Close all database connections."""
+        if self.read_only_conn is not None:
+            try:
+                self.read_only_conn.close()
+                logger.debug("Read-only connection closed")
+            except Exception as e:
+                logger.error(f"Error closing read-only connection: {e}", exc_info=True)
+            finally:
+                self.read_only_conn = None
+        
         if self.conn is not None:
             try:
                 self.conn.close()
@@ -431,6 +660,10 @@ class DatabaseManager:
                 logger.error(f"Error closing database: {e}", exc_info=True)
             finally:
                 self.conn = None
+
+    def close_all(self):
+        """Close all connections (alias for close)."""
+        self.close()
 
     def __enter__(self):
         """Context manager entry."""
@@ -473,93 +706,98 @@ class DatabaseManager:
             initial_resource = parameters.get("initial_resource")
             regeneration_rate = parameters.get("regeneration_rate")
             max_extraction = parameters.get("max_extraction")
-            max_fishes = parameters.get("max_fishes")
+            Max_fish = parameters.get("Max_fish") or parameters.get("max_fishes", 1000)  # Support both, default 1000
+            
+            # Check if old max_fishes column still exists (for migration compatibility)
+            has_max_fishes_col = False
+            try:
+                columns = conn.execute("DESCRIBE experiments").fetchall()
+                column_names = [col[0] for col in columns]
+                has_max_fishes_col = "max_fishes" in column_names
+            except Exception:
+                pass
             number_of_games = parameters.get("number_of_games")
             number_of_players_per_game = parameters.get("number_of_players_per_game")
             
             # Check if parameters column exists (for migration compatibility)
             has_old_parameters_column = False
             try:
-                columns = self.conn.execute("DESCRIBE experiments").fetchall()
+                columns = conn.execute("DESCRIBE experiments").fetchall()
                 column_names = [col[0] for col in columns]
                 has_old_parameters_column = "parameters" in column_names
             except Exception:
                 pass
             
-            # Build INSERT statement - include parameters column if it exists (for migration)
+            # Build INSERT statement - handle migration columns (parameters, max_fishes)
+            # If old columns exist, we need to include them to satisfy NOT NULL constraints
+            base_columns = ["experiment_id", "name", "status", "created_at"]
+            base_values = [experiment_id, name, "pending", datetime.now()]
+            
             if has_old_parameters_column:
-                # Include parameters column with empty string (since it may be NOT NULL)
-                # New code uses the individual columns, but we include parameters for compatibility
-                self.conn.execute("""
-                    INSERT INTO experiments (
-                        experiment_id, name, status, created_at, parameters,
-                        n_players, max_steps, initial_resource, regeneration_rate,
-                        max_extraction, max_fishes, number_of_games, number_of_players_per_game
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (experiment_id) 
-                    DO UPDATE SET 
-                        name = EXCLUDED.name,
-                        status = EXCLUDED.status,
-                        n_players = EXCLUDED.n_players,
-                        max_steps = EXCLUDED.max_steps,
-                        initial_resource = EXCLUDED.initial_resource,
-                        regeneration_rate = EXCLUDED.regeneration_rate,
-                        max_extraction = EXCLUDED.max_extraction,
-                        max_fishes = EXCLUDED.max_fishes,
-                        number_of_games = EXCLUDED.number_of_games,
-                        number_of_players_per_game = EXCLUDED.number_of_players_per_game
-                """, (
-                    experiment_id, name, "pending", datetime.now(), "",
-                    n_players, max_steps, initial_resource, regeneration_rate,
-                    max_extraction, max_fishes, number_of_games, number_of_players_per_game
-                ))
+                base_columns.append("parameters")
+                base_values.append("")
+            
+            param_columns = [
+                "n_players", "max_steps", "initial_resource", "regeneration_rate",
+                "max_extraction"
+            ]
+            param_values = [
+                n_players, max_steps, initial_resource, regeneration_rate,
+                max_extraction
+            ]
+            
+            # Handle Max_fish and max_fishes columns
+            if has_max_fishes_col:
+                # Both columns exist - set both to the same value
+                param_columns.extend(["max_fishes", "Max_fish"])
+                param_values.extend([Max_fish, Max_fish])
             else:
-                # New schema - no parameters column
-                self.conn.execute("""
-                    INSERT INTO experiments (
-                        experiment_id, name, status, created_at,
-                        n_players, max_steps, initial_resource, regeneration_rate,
-                        max_extraction, max_fishes, number_of_games, number_of_players_per_game
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (experiment_id) 
-                    DO UPDATE SET 
-                        name = EXCLUDED.name,
-                        status = EXCLUDED.status,
-                        n_players = EXCLUDED.n_players,
-                        max_steps = EXCLUDED.max_steps,
-                        initial_resource = EXCLUDED.initial_resource,
-                        regeneration_rate = EXCLUDED.regeneration_rate,
-                        max_extraction = EXCLUDED.max_extraction,
-                        max_fishes = EXCLUDED.max_fishes,
-                        number_of_games = EXCLUDED.number_of_games,
-                        number_of_players_per_game = EXCLUDED.number_of_players_per_game
-                """, (
-                    experiment_id, name, "pending", datetime.now(),
-                    n_players, max_steps, initial_resource, regeneration_rate,
-                    max_extraction, max_fishes, number_of_games, number_of_players_per_game
-                ))
+                # Only Max_fish exists
+                param_columns.append("Max_fish")
+                param_values.append(Max_fish)
+            
+            param_columns.extend(["number_of_games", "number_of_players_per_game"])
+            param_values.extend([number_of_games, number_of_players_per_game])
+            
+            all_columns = base_columns + param_columns
+            all_values = base_values + param_values
+            placeholders = ", ".join(["?"] * len(all_values))
+            
+            # Build UPDATE clause
+            update_clause = ", ".join([
+                f"{col} = EXCLUDED.{col}" 
+                for col in all_columns 
+                if col not in ["experiment_id", "created_at"]
+            ])
+            
+            query = f"""
+                INSERT INTO experiments ({", ".join(all_columns)})
+                VALUES ({placeholders})
+                ON CONFLICT (experiment_id) 
+                DO UPDATE SET {update_clause}
+            """
+            
+            conn.execute(query, all_values)
             
             # Delete existing players for this experiment (for updates)
-            self.conn.execute(
+            conn.execute(
                 "DELETE FROM experiment_players WHERE experiment_id = ?",
                 [experiment_id]
             )
             
-            # Insert players
+            # Insert players with UUIDs
             player_rows = [
-                (experiment_id, i, player["persona"], player["model"])
+                (experiment_id, i, str(uuid.uuid4()), player["persona"], player["model"])
                 for i, player in enumerate(players)
             ]
             
             if player_rows:
-                self.conn.executemany("""
-                    INSERT INTO experiment_players (experiment_id, player_index, persona, model)
-                    VALUES (?, ?, ?, ?)
+                conn.executemany("""
+                    INSERT INTO experiment_players (experiment_id, player_index, player_uuid, persona, model)
+                    VALUES (?, ?, ?, ?, ?)
                 """, player_rows)
             
-            self.conn.commit()
+            conn.commit()
             logger.info(f"Saved experiment {experiment_id} with {len(players)} players")
             return True
             
@@ -576,17 +814,22 @@ class DatabaseManager:
         Returns:
             Dictionary with experiment data or None if not found
         """
-        if not self.enabled or self.conn is None:
-            logger.warning("Database is not enabled or not initialized")
+        if not self.enabled:
+            logger.warning("Database is not enabled")
+            return None
+        
+        conn = self.get_read_connection()
+        if conn is None:
+            logger.warning("Database is not initialized")
             return None
         
         try:
             # Try to load with new schema (parameter columns)
             try:
-                exp_result = self.conn.execute("""
+                exp_result = conn.execute("""
                     SELECT name, status, created_at,
                            n_players, max_steps, initial_resource, regeneration_rate,
-                           max_extraction, max_fishes, number_of_games, number_of_players_per_game
+                           max_extraction, Max_fish, number_of_games, number_of_players_per_game
                     FROM experiments WHERE experiment_id = ?
                 """, [experiment_id]).fetchone()
                 
@@ -594,10 +837,10 @@ class DatabaseManager:
                     return None
                 
                 name, status, created_at, n_players, max_steps, initial_resource, regeneration_rate, \
-                    max_extraction, max_fishes, number_of_games, number_of_players_per_game = exp_result
+                    max_extraction, Max_fish, number_of_games, number_of_players_per_game = exp_result
             except Exception:
                 # Fallback to old schema (parameters JSON column)
-                exp_result = self.conn.execute(
+                exp_result = conn.execute(
                     "SELECT name, status, created_at, parameters FROM experiments WHERE experiment_id = ?",
                     [experiment_id]
                 ).fetchone()
@@ -612,7 +855,7 @@ class DatabaseManager:
                 initial_resource = parameters_dict.get("initial_resource")
                 regeneration_rate = parameters_dict.get("regeneration_rate")
                 max_extraction = parameters_dict.get("max_extraction")
-                max_fishes = parameters_dict.get("max_fishes")
+                Max_fish = parameters_dict.get("Max_fish") or parameters_dict.get("max_fishes", 1000)
                 number_of_games = parameters_dict.get("number_of_games")
                 number_of_players_per_game = parameters_dict.get("number_of_players_per_game")
             
@@ -623,24 +866,40 @@ class DatabaseManager:
                 "initial_resource": initial_resource,
                 "regeneration_rate": regeneration_rate,
                 "max_extraction": max_extraction,
-                "max_fishes": max_fishes,
+                "Max_fish": Max_fish,  # Use new name
                 "number_of_games": number_of_games,
                 "number_of_players_per_game": number_of_players_per_game,
             }
             
-            # Load players
-            player_results = self.conn.execute(
-                """SELECT player_index, persona, model 
-                   FROM experiment_players 
-                   WHERE experiment_id = ? 
-                   ORDER BY player_index""",
-                [experiment_id]
-            ).fetchall()
-            
-            players = [
-                {"persona": persona, "model": model}
-                for _, persona, model in player_results
-            ]
+            # Load players (with UUIDs)
+            try:
+                # Try new schema with player_uuid
+                player_results = conn.execute(
+                    """SELECT player_index, player_uuid, persona, model 
+                       FROM experiment_players 
+                       WHERE experiment_id = ? 
+                       ORDER BY player_index""",
+                    [experiment_id]
+                ).fetchall()
+                
+                players = [
+                    {"player_uuid": player_uuid, "persona": persona, "model": model}
+                    for _, player_uuid, persona, model in player_results
+                ]
+            except Exception:
+                # Fallback to old schema (without UUIDs) - generate UUIDs on the fly
+                player_results = conn.execute(
+                    """SELECT player_index, persona, model 
+                       FROM experiment_players 
+                       WHERE experiment_id = ? 
+                       ORDER BY player_index""",
+                    [experiment_id]
+                ).fetchall()
+                
+                players = [
+                    {"player_uuid": str(uuid.uuid4()), "persona": persona, "model": model}
+                    for _, persona, model in player_results
+                ]
             
             return {
                 "experiment_id": experiment_id,
@@ -661,12 +920,17 @@ class DatabaseManager:
         Returns:
             List of experiment dictionaries with basic info
         """
-        if not self.enabled or self.conn is None:
-            logger.warning("Database is not enabled or not initialized")
+        if not self.enabled:
+            logger.warning("Database is not enabled")
+            return []
+        
+        conn = self.get_read_connection()
+        if conn is None:
+            logger.warning("Database is not initialized")
             return []
         
         try:
-            results = self.conn.execute("""
+            results = conn.execute("""
                 SELECT 
                     e.experiment_id,
                     e.name,
@@ -708,16 +972,21 @@ class DatabaseManager:
         Returns:
             True if successful, False otherwise
         """
-        if not self.enabled or self.conn is None:
-            logger.warning("Database is not enabled or not initialized")
+        if not self.enabled:
+            logger.warning("Database is not enabled")
+            return False
+        
+        conn = self.get_write_connection()
+        if conn is None:
+            logger.warning("Cannot update experiment status - no write connection available")
             return False
         
         try:
-            self.conn.execute(
+            conn.execute(
                 "UPDATE experiments SET status = ? WHERE experiment_id = ?",
                 [status, experiment_id]
             )
-            self.conn.commit()
+            conn.commit()
             logger.info(f"Updated experiment {experiment_id} status to {status}")
             return True
             
@@ -729,7 +998,8 @@ class DatabaseManager:
         self,
         experiment_id: str,
         game_id: str,
-        summary: Dict
+        summary: Dict,
+        selected_players: Optional[List[Dict]] = None
     ) -> bool:
         """Save a game result for an experiment.
         
@@ -737,6 +1007,7 @@ class DatabaseManager:
             experiment_id: Experiment identifier
             game_id: Game identifier
             summary: Game summary dictionary
+            selected_players: Optional list of selected players with player_uuid, persona, model
             
         Returns:
             True if successful, False otherwise
@@ -753,14 +1024,22 @@ class DatabaseManager:
             cumulative_payoffs = summary.get("cumulative_payoffs", [])
             
             # Calculate winning player and payoff
-            winning_player_id = None
+            winning_player_uuid = None
             winning_payoff = None
             cumulative_payoff_sum = None
             
-            if cumulative_payoffs:
+            if cumulative_payoffs and selected_players:
                 # Find player with highest payoff
                 max_payoff = max(cumulative_payoffs)
-                winning_player_id = cumulative_payoffs.index(max_payoff)
+                winning_player_index = cumulative_payoffs.index(max_payoff)
+                # Get UUID of winning player
+                if winning_player_index < len(selected_players):
+                    winning_player_uuid = selected_players[winning_player_index].get("player_uuid")
+                winning_payoff = float(max_payoff)
+                cumulative_payoff_sum = float(sum(cumulative_payoffs))
+            elif cumulative_payoffs:
+                # Fallback if selected_players not provided - still calculate payoff
+                max_payoff = max(cumulative_payoffs)
                 winning_payoff = float(max_payoff)
                 cumulative_payoff_sum = float(sum(cumulative_payoffs))
             
@@ -776,10 +1055,10 @@ class DatabaseManager:
                 final_resource_level = float(final_resource_level)
             tragedy_occurred = bool(tragedy_occurred)
             
-            self.conn.execute("""
+            conn.execute("""
                 INSERT INTO experiment_results (
                     experiment_id, game_id, summary, timestamp,
-                    winning_player_id, winning_payoff, cumulative_payoff_sum,
+                    winning_player_uuid, winning_payoff, cumulative_payoff_sum,
                     total_rounds, final_resource_level, tragedy_occurred
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -787,7 +1066,7 @@ class DatabaseManager:
                 DO UPDATE SET 
                     summary = EXCLUDED.summary,
                     timestamp = EXCLUDED.timestamp,
-                    winning_player_id = EXCLUDED.winning_player_id,
+                    winning_player_uuid = EXCLUDED.winning_player_uuid,
                     winning_payoff = EXCLUDED.winning_payoff,
                     cumulative_payoff_sum = EXCLUDED.cumulative_payoff_sum,
                     total_rounds = EXCLUDED.total_rounds,
@@ -795,11 +1074,50 @@ class DatabaseManager:
                     tragedy_occurred = EXCLUDED.tragedy_occurred
             """, (
                 experiment_id, game_id, summary_json, timestamp,
-                winning_player_id, winning_payoff, cumulative_payoff_sum,
+                winning_player_uuid, winning_payoff, cumulative_payoff_sum,
                 total_rounds, final_resource_level, tragedy_occurred
             ))
             
-            self.conn.commit()
+            # Save individual player results if selected_players provided
+            if selected_players and cumulative_payoffs:
+                player_rows = []
+                for i, player_info in enumerate(selected_players):
+                    if i >= len(cumulative_payoffs):
+                        logger.warning(f"Player {i} has no reward data in summary for game {game_id}")
+                        continue
+                    
+                    # Get player UUID (must exist for experiments)
+                    player_uuid = player_info.get("player_uuid")
+                    if not player_uuid:
+                        logger.warning(f"Player {i} in game {game_id} missing player_uuid, skipping")
+                        continue
+                    
+                    persona = player_info.get("persona", "unknown")
+                    model = player_info.get("model", "unknown")
+                    total_reward = float(cumulative_payoffs[i])
+                    
+                    player_rows.append((
+                        experiment_id, game_id, player_uuid, i, persona, model, total_reward, timestamp
+                    ))
+                
+                if player_rows:
+                    conn.executemany("""
+                        INSERT INTO experiment_game_players (
+                            experiment_id, game_id, player_uuid, player_index,
+                            persona, model, total_reward, timestamp
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (experiment_id, game_id, player_uuid) 
+                        DO UPDATE SET 
+                            player_index = EXCLUDED.player_index,
+                            persona = EXCLUDED.persona,
+                            model = EXCLUDED.model,
+                            total_reward = EXCLUDED.total_reward,
+                            timestamp = EXCLUDED.timestamp
+                    """, player_rows)
+                    logger.debug(f"Saved {len(player_rows)} individual player results for game {game_id}")
+            
+            conn.commit()
             logger.debug(f"Saved result for game {game_id} in experiment {experiment_id}")
             return True
             
@@ -816,12 +1134,17 @@ class DatabaseManager:
         Returns:
             List of game result dictionaries
         """
-        if not self.enabled or self.conn is None:
-            logger.warning("Database is not enabled or not initialized")
+        if not self.enabled:
+            logger.warning("Database is not enabled")
+            return []
+        
+        conn = self.get_read_connection()
+        if conn is None:
+            logger.warning("Database is not initialized")
             return []
         
         try:
-            results = self.conn.execute(
+            results = conn.execute(
                 "SELECT game_id, summary, timestamp FROM experiment_results WHERE experiment_id = ? ORDER BY timestamp",
                 [experiment_id]
             ).fetchall()
@@ -854,30 +1177,158 @@ class DatabaseManager:
         Returns:
             True if successful, False otherwise
         """
-        if not self.enabled or self.conn is None:
-            logger.warning("Database is not enabled or not initialized")
+        if not self.enabled:
+            logger.warning("Database is not enabled")
+            return False
+        
+        conn = self.get_write_connection()
+        if conn is None:
+            logger.warning("Cannot delete experiment - no write connection available")
             return False
         
         try:
             # Manual cascade delete (DuckDB doesn't support ON DELETE CASCADE)
             # Delete in order: results -> players -> experiment
-            self.conn.execute(
+            conn.execute(
                 "DELETE FROM experiment_results WHERE experiment_id = ?",
                 [experiment_id]
             )
-            self.conn.execute(
+            conn.execute(
                 "DELETE FROM experiment_players WHERE experiment_id = ?",
                 [experiment_id]
             )
-            self.conn.execute(
+            conn.execute(
                 "DELETE FROM experiments WHERE experiment_id = ?",
                 [experiment_id]
             )
-            self.conn.commit()
+            conn.commit()
             logger.info(f"Deleted experiment {experiment_id} and all associated data")
             return True
             
         except Exception as e:
             logger.error(f"Failed to delete experiment: {e}", exc_info=True)
             return False
+
+    def get_game_result(self, experiment_id: str, game_id: str) -> Optional[Dict]:
+        """Get a single game result for an experiment.
+        
+        Args:
+            experiment_id: Experiment identifier
+            game_id: Game identifier
+            
+        Returns:
+            Dictionary with game result data or None if not found
+        """
+        if not self.enabled:
+            logger.warning("Database is not enabled")
+            return None
+        
+        conn = self.get_read_connection()
+        if conn is None:
+            logger.warning("Database is not initialized")
+            return None
+        
+        try:
+            # Check which column exists (winning_player_uuid or winning_player_id)
+            columns = conn.execute("DESCRIBE experiment_results").fetchall()
+            column_names = [col[0] for col in columns]
+            has_uuid_col = "winning_player_uuid" in column_names
+            has_id_col = "winning_player_id" in column_names
+            
+            # Build SELECT query based on available columns
+            if has_uuid_col:
+                select_cols = "game_id, summary, timestamp, winning_player_uuid, winning_payoff, cumulative_payoff_sum, total_rounds, final_resource_level, tragedy_occurred"
+            elif has_id_col:
+                select_cols = "game_id, summary, timestamp, winning_player_id, winning_payoff, cumulative_payoff_sum, total_rounds, final_resource_level, tragedy_occurred"
+            else:
+                # Fallback if neither exists
+                select_cols = "game_id, summary, timestamp, winning_payoff, cumulative_payoff_sum, total_rounds, final_resource_level, tragedy_occurred"
+            
+            result = conn.execute(
+                f"SELECT {select_cols} FROM experiment_results WHERE experiment_id = ? AND game_id = ?",
+                [experiment_id, game_id]
+            ).fetchone()
+            
+            if result is None:
+                return None
+            
+            # Parse result based on which columns were selected
+            if has_uuid_col:
+                game_id, summary_json, timestamp, winning_player_uuid, winning_payoff, \
+                    cumulative_payoff_sum, total_rounds, final_resource_level, tragedy_occurred = result
+            elif has_id_col:
+                game_id, summary_json, timestamp, winning_player_id, winning_payoff, \
+                    cumulative_payoff_sum, total_rounds, final_resource_level, tragedy_occurred = result
+                winning_player_uuid = None  # Convert ID to UUID if needed (would need player lookup)
+            else:
+                game_id, summary_json, timestamp, winning_payoff, \
+                    cumulative_payoff_sum, total_rounds, final_resource_level, tragedy_occurred = result
+                winning_player_uuid = None
+            
+            try:
+                summary = json.loads(summary_json)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse summary for game {game_id}: {e}")
+                summary = {}
+            
+            return {
+                "game_id": game_id,
+                "summary": summary,
+                "timestamp": timestamp,
+                "winning_player_uuid": winning_player_uuid,
+                "winning_payoff": winning_payoff,
+                "cumulative_payoff_sum": cumulative_payoff_sum,
+                "total_rounds": total_rounds,
+                "final_resource_level": final_resource_level,
+                "tragedy_occurred": tragedy_occurred
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get game result: {e}", exc_info=True)
+            return None
+
+    def get_game_players(self, experiment_id: str, game_id: str) -> List[Dict]:
+        """Get all players for a specific game.
+        
+        Args:
+            experiment_id: Experiment identifier
+            game_id: Game identifier
+            
+        Returns:
+            List of player dictionaries with persona, model, total_reward, etc.
+        """
+        if not self.enabled:
+            logger.warning("Database is not enabled")
+            return []
+        
+        conn = self.get_read_connection()
+        if conn is None:
+            logger.warning("Database is not initialized")
+            return []
+        
+        try:
+            results = conn.execute(
+                """SELECT player_uuid, player_index, persona, model, total_reward, timestamp
+                   FROM experiment_game_players
+                   WHERE experiment_id = ? AND game_id = ?
+                   ORDER BY player_index""",
+                [experiment_id, game_id]
+            ).fetchall()
+            
+            players = []
+            for player_uuid, player_index, persona, model, total_reward, timestamp in results:
+                players.append({
+                    "player_uuid": player_uuid,
+                    "player_index": player_index,
+                    "persona": persona,
+                    "model": model,
+                    "total_reward": total_reward,
+                    "timestamp": timestamp
+                })
+            
+            return players
+            
+        except Exception as e:
+            logger.error(f"Failed to get game players: {e}", exc_info=True)
+            return []
 

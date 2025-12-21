@@ -33,15 +33,23 @@ def create_and_run_experiment():
     ]
     
     # Define experiment parameters
+    # Fixed values per constraints
+    INITIAL_RESOURCE = 1000
+    Max_fish = 1000
+    REGENERATION_RATE = 2.0
+    number_of_players_per_game = 2  # Use all players
+    # Calculate MAX_EXTRACTION: int(4 * INITIAL_RESOURCE / 7 * Number of Players per Game)
+    max_extraction = int(4 * INITIAL_RESOURCE / (7 * number_of_players_per_game))
+    
     parameters = {
         "n_players": 2,
-        "max_steps": 20,
-        "initial_resource": 100,
-        "regeneration_rate": 2.0,
-        "max_extraction": 35,
-        "max_fishes": 100,
-        "number_of_games": 3,
-        "number_of_players_per_game": 2,  # Use all players
+        "max_steps": 20,  # Default: 20
+        "initial_resource": INITIAL_RESOURCE,  # Fixed: 1000
+        "regeneration_rate": REGENERATION_RATE,  # Fixed: 2.0
+        "max_extraction": max_extraction,  # Calculated
+        "Max_fish": Max_fish,  # Fixed: 1000 (renamed from max_fishes)
+        "number_of_games": 10,  # Default: 10
+        "number_of_players_per_game": number_of_players_per_game,
     }
     
     print(f"Creating experiment: {experiment_name}")
