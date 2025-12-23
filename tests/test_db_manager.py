@@ -28,7 +28,7 @@ class TestDatabaseManagerInitialization:
     def test_init_with_default_path(self):
         """Test initialization with default path."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             db_manager = DatabaseManager(db_path=db_path, enabled=True)
             
             assert db_manager.enabled is True
@@ -47,7 +47,7 @@ class TestDatabaseManagerInitialization:
     def test_init_creates_directory(self):
         """Test that initialization creates parent directory if needed."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "subdir", "nested", "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "subdir", "nested", "test_db.db")
             db_manager = DatabaseManager(db_path=db_path, enabled=True)
             
             assert os.path.exists(db_path)
@@ -58,7 +58,7 @@ class TestDatabaseManagerInitialization:
     def test_table_creation(self):
         """Test that table is created on initialization."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             db_manager = DatabaseManager(db_path=db_path, enabled=True)
             
             # Check table exists by trying to query it
@@ -76,7 +76,7 @@ class TestSaveGameResults:
     def test_save_single_game_results(self):
         """Test saving results for a single game."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             db_manager = DatabaseManager(db_path=db_path, enabled=True)
             
             # Create mock agents
@@ -134,7 +134,7 @@ class TestSaveGameResults:
     def test_save_multiple_games(self):
         """Test saving results for multiple games."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             db_manager = DatabaseManager(db_path=db_path, enabled=True)
             
             # Save first game
@@ -168,7 +168,7 @@ class TestSaveGameResults:
     def test_save_with_config_model_fallback(self):
         """Test that model is taken from config if not in agent."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             db_manager = DatabaseManager(db_path=db_path, enabled=True)
             
             # Create agent without llm_model
@@ -195,7 +195,7 @@ class TestSaveGameResults:
     def test_save_with_missing_cumulative_payoffs(self):
         """Test handling when cumulative_payoffs is missing."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             db_manager = DatabaseManager(db_path=db_path, enabled=True)
             
             agents = [Mock(player_id=0, persona="test", llm_model="gpt-3.5-turbo")]
@@ -236,7 +236,7 @@ class TestSaveGameResults:
     def test_save_updates_existing_record(self):
         """Test that saving same game_id+player_id updates existing record."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             db_manager = DatabaseManager(db_path=db_path, enabled=True)
             
             # Save first time
@@ -269,7 +269,7 @@ class TestSaveGameResults:
     def test_save_with_mock_agent(self):
         """Test saving with MockLLMAgent (which doesn't have llm_model)."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             db_manager = DatabaseManager(db_path=db_path, enabled=True)
             
             # Create MockLLMAgent with full config
@@ -306,7 +306,7 @@ class TestQueryResults:
     def test_get_all_results(self):
         """Test getting all results."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             db_manager = DatabaseManager(db_path=db_path, enabled=True)
             
             # Save multiple games
@@ -331,7 +331,7 @@ class TestQueryResults:
     def test_get_player_stats(self):
         """Test getting player statistics."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             db_manager = DatabaseManager(db_path=db_path, enabled=True)
             
             # Save multiple games for same player
@@ -356,7 +356,7 @@ class TestQueryResults:
     def test_get_all_player_stats(self):
         """Test getting statistics for all players."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             db_manager = DatabaseManager(db_path=db_path, enabled=True)
             
             # Save games with different players
@@ -381,7 +381,7 @@ class TestQueryResults:
     def test_custom_query(self):
         """Test executing custom queries."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             db_manager = DatabaseManager(db_path=db_path, enabled=True)
             
             # Save some data
@@ -410,7 +410,7 @@ class TestContextManager:
     def test_context_manager(self):
         """Test using database manager as context manager."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             
             with DatabaseManager(db_path=db_path, enabled=True) as db_manager:
                 agents = [Mock(player_id=0, persona="test", llm_model="gpt-3.5-turbo")]
@@ -434,7 +434,7 @@ class TestIntegrationWithGameRunner:
     def test_game_runner_saves_to_database(self):
         """Test that GameRunner automatically saves to database."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_db.duckdb")
+            db_path = os.path.join(tmpdir, "test_db.db")
             
             # Create config with database path (use CONFIG as base)
             config = CONFIG.copy()

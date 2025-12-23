@@ -1,7 +1,13 @@
 """Analysis tools for CPR experiment results.
 
-Provides functions for loading, analyzing, and visualizing
-experiment results.
+⚠️ DEPRECATED: This module is deprecated. Use the database-driven analysis instead.
+
+For analyzing experiments, use:
+- `query_experiments.ipynb` (Jupyter notebook) - Recommended for interactive analysis
+- `query_experiments.py` (Python script) - For programmatic queries
+
+This old module works with JSON files from the deprecated experiment system.
+The new system stores results in SQLite for better querying and analysis.
 """
 
 import json

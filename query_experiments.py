@@ -15,7 +15,7 @@ import pandas as pd
 
 def query_experiments():
     """Query all experiments."""
-    db_path = CONFIG.get("db_path", "data/game_results.duckdb")
+    db_path = CONFIG.get("db_path", "data/game_results.db")
     db_manager = DatabaseManager(db_path=db_path, enabled=True)
     
     # Try to query with new schema (individual columns)
@@ -128,7 +128,7 @@ def query_experiments():
 
 def query_experiment_players(experiment_id: str = None):
     """Query experiment players."""
-    db_path = CONFIG.get("db_path", "data/game_results.duckdb")
+    db_path = CONFIG.get("db_path", "data/game_results.db")
     db_manager = DatabaseManager(db_path=db_path, enabled=True)
     
     if experiment_id:
@@ -172,7 +172,7 @@ def query_experiment_players(experiment_id: str = None):
 
 def cleanup_nan_results():
     """Delete rows from experiment_results that have NaN values in the new columns."""
-    db_path = CONFIG.get("db_path", "data/game_results.duckdb")
+    db_path = CONFIG.get("db_path", "data/game_results.db")
     db_manager = DatabaseManager(db_path=db_path, enabled=True)
     
     if not db_manager.enabled or db_manager.conn is None:
@@ -223,7 +223,7 @@ def cleanup_nan_results():
 
 def query_experiment_results(experiment_id: str = None):
     """Query experiment results with improved formatting."""
-    db_path = CONFIG.get("db_path", "data/game_results.duckdb")
+    db_path = CONFIG.get("db_path", "data/game_results.db")
     db_manager = DatabaseManager(db_path=db_path, enabled=True)
     
     if experiment_id:
@@ -343,7 +343,7 @@ def query_experiment_results(experiment_id: str = None):
 
 def query_custom(sql: str, params: list = None):
     """Run a custom SQL query."""
-    db_path = CONFIG.get("db_path", "data/game_results.duckdb")
+    db_path = CONFIG.get("db_path", "data/game_results.db")
     db_manager = DatabaseManager(db_path=db_path, enabled=True)
     
     print("=" * 60)

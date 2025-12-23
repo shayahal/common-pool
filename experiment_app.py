@@ -10,6 +10,10 @@ import uuid
 import pandas as pd
 from datetime import datetime
 import json
+import io
+import contextlib
+import threading
+from queue import Queue
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -17,7 +21,58 @@ sys.path.insert(0, str(Path(__file__).parent))
 from cpr_game.db_manager import DatabaseManager
 from cpr_game.config import CONFIG
 from cpr_game.persona_prompts import PERSONA_PROMPTS
+from cpr_game.logger_setup import get_logger
 from main import run_experiment
+
+logger = get_logger(__name__)
+
+
+class StreamlitProgressCallback:
+    """Callback for experiment progress updates in Streamlit UI."""
+    
+    def __init__(self, progress_bar, status_text, log_container):
+        self.progress_bar = progress_bar
+        self.status_text = status_text
+        self.log_container = log_container
+        self.logs = []
+        self.max_logs = 200
+        self.total_games = 0
+        self.completed_games = 0
+        
+    def set_total(self, total):
+        """Set total number of games."""
+        self.total_games = total
+        
+    def update_progress(self, completed, total=None):
+        """Update progress bar."""
+        if total:
+            self.total_games = total
+        self.completed_games = completed
+        if self.total_games > 0:
+            progress = completed / self.total_games
+            self.progress_bar.progress(progress)
+            self.status_text.info(f"📊 Progress: {completed}/{self.total_games} games completed")
+    
+    def add_log(self, message, level="info"):
+        """Add log message."""
+        if message.strip():
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            log_entry = f"[{timestamp}] {message.strip()}"
+            self.logs.append(log_entry)
+            # Keep only last max_logs lines
+            if len(self.logs) > self.max_logs:
+                self.logs = self.logs[-self.max_logs:]
+            # Update UI (show last 30 lines)
+            self.log_container.code("\n".join(self.logs[-30:]), language=None)
+    
+    def set_status(self, message, success=False, error=False):
+        """Set status message."""
+        if success:
+            self.status_text.success(f"✅ {message}")
+        elif error:
+            self.status_text.error(f"❌ {message}")
+        else:
+            self.status_text.info(f"ℹ️ {message}")
 
 # Available models (common OpenAI models)
 AVAILABLE_MODELS = [
@@ -33,9 +88,9 @@ AVAILABLE_MODELS = [
 def get_db_manager():
     """Get cached read-only database manager for queries.
     
-    Uses READ_ONLY mode to allow concurrent access with DuckDB UI.
+    Uses READ_ONLY mode to allow concurrent access with external database tools.
     """
-    db_path = CONFIG.get("db_path", "data/game_results.duckdb")
+    db_path = CONFIG.get("db_path", "data/game_results.db")
     db_enabled = CONFIG.get("db_enabled", True)
     return DatabaseManager(db_path=db_path, enabled=db_enabled, access_mode='READ_ONLY')
 
@@ -46,7 +101,7 @@ def get_write_db_manager():
     Creates a new READ_WRITE connection for write operations.
     Should be used temporarily and closed after use.
     """
-    db_path = CONFIG.get("db_path", "data/game_results.duckdb")
+    db_path = CONFIG.get("db_path", "data/game_results.db")
     db_enabled = CONFIG.get("db_enabled", True)
     return DatabaseManager(db_path=db_path, enabled=db_enabled, access_mode='READ_WRITE')
 
@@ -66,6 +121,24 @@ def main():
 
     if not db_manager.enabled:
         st.error("❌ Database is not enabled. Please check your configuration.")
+        return
+    
+    if db_manager.conn is None:
+        st.error("❌ Database connection failed. This may be due to:")
+        st.error("   • Another process has the database locked (close database UI tools or other connections)")
+        st.error("   • Database file permissions issue")
+        st.error("   • Database file corruption")
+        st.info("💡 **Tip**: Try refreshing the page or closing any database UI tools that might be accessing the database.")
+        
+        # Try to recreate the connection
+        if st.button("🔄 Retry Database Connection"):
+            get_db_manager.clear()
+            db_manager = get_db_manager()
+            if db_manager.conn is not None:
+                st.success("✅ Database connection restored!")
+                st.rerun()
+            else:
+                st.error("❌ Still unable to connect. Check logs for details.")
         return
 
     # Tabs for different views
@@ -224,6 +297,14 @@ def _show_experiment_definition(db_manager: DatabaseManager):
                 f"All players will participate in every game."
             )
 
+    # Auto-run options
+    st.divider()
+    auto_run_mock = st.checkbox(
+        "🚀 Auto-run experiment after creation (using mock agents)",
+        value=True,
+        help="If checked, the experiment will automatically start running after being saved (uses mock agents for faster testing)"
+    )
+    
     # Save experiment button
     st.divider()
     
@@ -252,19 +333,108 @@ def _show_experiment_definition(db_manager: DatabaseManager):
             }
 
             # Save to database (use write manager)
-            write_db_manager = get_write_db_manager()
+            # Close read-only connection first to avoid lock conflicts
+            import time
+            
+            if db_manager.conn is not None:
+                db_manager.close()
+                # Give database a moment to release the lock
+                time.sleep(0.1)
+            
+            get_db_manager.clear()  # Clear cache so it can be recreated
+            
+            write_db_manager = None
+            max_retries = 3
+            retry_delay = 0.2
+            
+            for attempt in range(max_retries):
+                try:
+                    write_db_manager = get_write_db_manager()
+                    
+                    # Check if write connection was successful
+                    if write_db_manager.conn is None:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"Write connection failed, retrying ({attempt + 1}/{max_retries})...")
+                            time.sleep(retry_delay)
+                            continue
+                        else:
+                            st.error("❌ Failed to create write connection after retries. Database may be locked.")
+                            logger.error("Write database manager connection is None after retries")
+                            success = False
+                            break
+                    else:
+                        # Connection successful, proceed with save
+                        success = write_db_manager.save_experiment(
+                            experiment_id=experiment_id,
+                            name=experiment_name,
+                            players=st.session_state.experiment_players,
+                            parameters=parameters
+                        )
+                        break  # Success, exit retry loop
+                        
+                except Exception as e:
+                    if "lock" in str(e).lower() or "locked" in str(e).lower():
+                        if attempt < max_retries - 1:
+                            logger.warning(f"Database lock detected, retrying ({attempt + 1}/{max_retries})...")
+                            time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                            continue
+                        else:
+                            logger.error(f"Error saving experiment after retries: {e}", exc_info=True)
+                            st.error(f"❌ Database is locked. Please close any database UI tools or other connections and try again.")
+                            success = False
+                            break
+                    else:
+                        logger.error(f"Error saving experiment: {e}", exc_info=True)
+                        st.error(f"❌ Error saving experiment: {str(e)}")
+                        success = False
+                        break
+            else:
+                # If we exhausted retries without success
+                success = False
+            
+            # Cleanup
+            if write_db_manager is not None:
+                try:
+                    write_db_manager.close()
+                except Exception as e:
+                    logger.warning(f"Error closing write connection: {e}")
+                time.sleep(0.1)  # Give database time to release lock
+            
+            # Recreate read-only connection for queries
             try:
-                success = write_db_manager.save_experiment(
-                    experiment_id=experiment_id,
-                    name=experiment_name,
-                    players=st.session_state.experiment_players,
-                    parameters=parameters
-                )
-            finally:
-                write_db_manager.close()
+                db_manager = get_db_manager()
+            except Exception as e:
+                logger.error(f"Failed to recreate read-only connection: {e}", exc_info=True)
+                st.warning("⚠️ Could not recreate read-only connection. Refresh the page if needed.")
 
             if success:
                 st.success(f"✅ Experiment '{experiment_name}' saved with ID: {experiment_id}")
+                
+                # Automatically start running the experiment in a background thread if requested
+                if auto_run_mock:
+                    def run_experiment_background(exp_id: str, use_mock: bool = True, max_workers: int = 10):
+                        """Run experiment in background thread."""
+                        try:
+                            logger.info(f"Starting background execution of experiment {exp_id}")
+                            run_experiment(
+                                experiment_id=exp_id,
+                                use_mock_agents=use_mock,
+                                max_workers=max_workers
+                            )
+                            logger.info(f"Background execution of experiment {exp_id} completed")
+                        except Exception as e:
+                            logger.error(f"Error in background experiment execution: {e}", exc_info=True)
+                    
+                    # Start experiment in background thread (use mock agents)
+                    experiment_thread = threading.Thread(
+                        target=run_experiment_background,
+                        args=(experiment_id, True, 10),  # use_mock=True, max_workers=10
+                        daemon=True
+                    )
+                    experiment_thread.start()
+                    
+                    st.info(f"🚀 Experiment '{experiment_name}' is now running in the background (using mock agents). Check the Experiments List tab to see progress.")
+                
                 # Clear form
                 st.session_state.experiment_players = []
                 st.rerun()
@@ -276,9 +446,26 @@ def _show_experiments_list(db_manager: DatabaseManager):
     """Show list of all experiments."""
     st.header("Experiments")
 
-    # Refresh button
-    if st.button("🔄 Refresh", key="refresh_experiments"):
-        st.rerun()
+    # Action buttons
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔄 Refresh", key="refresh_experiments", use_container_width=True):
+            st.rerun()
+    
+    with col2:
+        if st.button("↩️ Reset All to Pending", key="reset_all_pending", use_container_width=True, type="secondary"):
+            write_db_manager = get_write_db_manager()
+            try:
+                count = write_db_manager.reset_all_experiments_to_pending()
+                if count >= 0:
+                    st.success(f"✅ Reset {count} experiment(s) to 'pending' status")
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to reset experiments")
+            except Exception as e:
+                st.error(f"❌ Error resetting experiments: {e}")
+            finally:
+                write_db_manager.close()
 
     # Load experiments
     experiments = db_manager.list_experiments()
@@ -337,28 +524,33 @@ def _show_experiments_list(db_manager: DatabaseManager):
                     st.warning("⏳ Experiment is currently running...")
                 elif is_completed:
                     st.success("✅ Experiment completed")
-                    if st.button("🔄 Run Again", use_container_width=True, key="run_again"):
+                    if st.button("🔄 Run Again", use_container_width=True, key=f"run_again_{selected_exp_id}"):
                         st.session_state[f"run_exp_{selected_exp_id}"] = True
+                        st.rerun()
                 else:
-                    if st.button("▶️ Run Experiment", use_container_width=True, key="run_exp"):
-                        st.session_state[f"run_exp_{selected_exp_id}"] = True
+                    # Check if we're already showing the config form
+                    if not st.session_state.get(f"run_exp_{selected_exp_id}", False):
+                        if st.button("▶️ Run Experiment", use_container_width=True, key=f"run_exp_{selected_exp_id}"):
+                            st.session_state[f"run_exp_{selected_exp_id}"] = True
+                            st.rerun()
 
             with col3:
-                if st.button("🗑️ Delete", use_container_width=True, type="secondary"):
+                if st.button("🗑️ Delete", use_container_width=True, type="secondary", key=f"delete_{selected_exp_id}"):
                     write_db_manager = get_write_db_manager()
                     try:
                         if write_db_manager.delete_experiment(selected_exp_id):
                             st.success(f"✅ Experiment '{experiment['name']}' deleted")
+                            # Clear any pending run states
+                            if f"run_exp_{selected_exp_id}" in st.session_state:
+                                del st.session_state[f"run_exp_{selected_exp_id}"]
                             st.rerun()
                         else:
                             st.error("❌ Failed to delete experiment")
                     finally:
                         write_db_manager.close()
 
-            # Handle experiment run
+            # Handle experiment run configuration form
             if st.session_state.get(f"run_exp_{selected_exp_id}", False):
-                st.session_state[f"run_exp_{selected_exp_id}"] = False
-                
                 # Run configuration
                 st.divider()
                 st.markdown("### Run Experiment Configuration")
@@ -379,40 +571,175 @@ def _show_experiments_list(db_manager: DatabaseManager):
                         help="Number of parallel workers for running games"
                     )
                 
-                if st.button("🚀 Start Experiment", type="primary", use_container_width=True):
-                    # Store run parameters
-                    st.session_state[f"run_exp_config_{selected_exp_id}"] = {
-                        "use_mock": use_mock,
-                        "max_workers": max_workers
-                    }
-                    st.session_state[f"should_run_{selected_exp_id}"] = True
-                    st.rerun()
+                col_btn1, col_btn2 = st.columns([1, 1])
+                with col_btn1:
+                    if st.button("🚀 Start Experiment", type="primary", use_container_width=True):
+                        # Store run parameters
+                        st.session_state[f"run_exp_config_{selected_exp_id}"] = {
+                            "use_mock": use_mock,
+                            "max_workers": max_workers
+                        }
+                        st.session_state[f"should_run_{selected_exp_id}"] = True
+                        # Clear the config form flag
+                        st.session_state[f"run_exp_{selected_exp_id}"] = False
+                        st.rerun()
+                with col_btn2:
+                    if st.button("❌ Cancel", use_container_width=True):
+                        # Clear the config form flag
+                        st.session_state[f"run_exp_{selected_exp_id}"] = False
+                        st.rerun()
             
             # Execute experiment run
             if st.session_state.get(f"should_run_{selected_exp_id}", False):
                 st.session_state[f"should_run_{selected_exp_id}"] = False
                 config = st.session_state.get(f"run_exp_config_{selected_exp_id}", {})
                 
-                st.info("🚀 Starting experiment... This may take a while. Please wait.")
+                # Create UI containers for progress and logs
+                st.divider()
+                st.markdown("### 🚀 Experiment Execution")
                 
-                # Run experiment (this will block, but Streamlit will show it's working)
-                with st.spinner("Running experiment... This may take several minutes."):
-                    try:
-                        success = run_experiment(
-                            experiment_id=selected_exp_id,
-                            use_mock_agents=config.get("use_mock", False),
-                            max_workers=config.get("max_workers", 10)
-                        )
+                status_placeholder = st.empty()
+                progress_placeholder = st.empty()
+                log_placeholder = st.empty()
+                
+                # Initialize status
+                status_placeholder.info("🚀 Starting experiment... This may take a while. Please wait.")
+                
+                # Create progress bar
+                progress_bar = progress_placeholder.progress(0)
+                status_text = st.empty()
+                
+                # Create log display area
+                log_display = log_placeholder.empty()
+                logs = []
+                
+                def add_log(message):
+                    """Add log message to display."""
+                    if message.strip():
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        logs.append(f"[{timestamp}] {message.strip()}")
+                        # Keep last 50 lines
+                        if len(logs) > 50:
+                            logs.pop(0)
+                        # Update display
+                        log_display.code("\n".join(logs), language=None)
+                
+                # Show experiment configuration
+                add_log(f"Experiment ID: {selected_exp_id}")
+                add_log(f"Use Mock Agents: {config.get('use_mock', False)}")
+                add_log(f"Max Workers: {config.get('max_workers', 10)}")
+                
+                # Load experiment to get details
+                experiment_details = db_manager.load_experiment(selected_exp_id)
+                if experiment_details:
+                    total_games = experiment_details['parameters'].get('number_of_games', 0)
+                    add_log(f"Total games to run: {total_games}")
+                    add_log(f"Players per game: {experiment_details['parameters'].get('number_of_players_per_game', 0)}")
+                    add_log(f"Max steps: {experiment_details['parameters'].get('max_steps', 0)}")
+                add_log("=" * 60)
+                add_log("Starting experiment execution...")
+                add_log("Note: This may take several minutes. Check the log file for real-time updates.")
+                add_log(f"Log file: logs/cpr_game.log")
+                
+                # Show link to view logs
+                log_file_path = Path("logs/cpr_game.log")
+                if log_file_path.exists():
+                    with open(log_file_path, 'r') as f:
+                        recent_logs = f.readlines()[-20:]  # Last 20 lines
+                        if recent_logs:
+                            with st.expander("📋 View Recent Logs (Last 20 lines)", expanded=False):
+                                st.code("".join(recent_logs), language=None)
+                
+                # Run experiment
+                try:
+                    add_log("Calling run_experiment()...")
+                    
+                    # Run experiment
+                    success = run_experiment(
+                        experiment_id=selected_exp_id,
+                        use_mock_agents=config.get("use_mock", False),
+                        max_workers=config.get("max_workers", 10)
+                    )
+                    
+                    add_log("run_experiment() completed")
+                    
+                    # Update progress to 100%
+                    progress_bar.progress(1.0)
+                    
+                    if success:
+                        status_text.success("✅ Experiment completed successfully!")
+                        add_log("=" * 60)
+                        add_log("✅ Experiment completed successfully!")
                         
-                        if success:
-                            st.success("✅ Experiment completed successfully!")
-                            # Refresh experiment data (read-only is fine for this)
-                            experiment = db_manager.load_experiment(selected_exp_id)
-                        else:
-                            st.error("❌ Experiment failed. Check logs for details.")
-                    except Exception as e:
-                        st.error(f"❌ Error running experiment: {str(e)}")
+                        # Refresh experiment data
+                        experiment = db_manager.load_experiment(selected_exp_id)
+                        if experiment:
+                            add_log(f"Final status: {experiment.get('status', 'unknown')}")
+                            add_log(f"Total games completed: {experiment.get('game_count', 0)}")
+                        
+                        st.success("✅ Experiment completed successfully!")
+                        st.balloons()  # Celebration!
+                        st.rerun()  # Refresh to show updated status
+                    else:
+                        status_text.error("❌ Experiment failed. Check logs below for details.")
+                        add_log("=" * 60)
+                        add_log("❌ Experiment failed. Check logs above for details.")
+                        st.error("❌ Experiment failed. Check logs above for details.")
+                        
+                except ValueError as e:
+                    error_msg = str(e)
+                    status_text.error(f"❌ Configuration Error: {error_msg}")
+                    add_log(f"❌ ERROR: {error_msg}")
+                    add_log(f"Error type: ValueError")
+                    st.error(f"❌ Configuration Error: {error_msg}")
+                    
+                    # Show helpful tips based on error
+                    if "API key" in error_msg or "Langfuse" in error_msg or "OpenTelemetry" in error_msg:
+                        st.warning("💡 **Missing Configuration**")
+                        st.info("Make sure you have set all required environment variables in your `.env` file:")
+                        st.code("""
+# Required for LLM agents
+OPENAI_API_KEY=sk-...
+
+# Required for OpenTelemetry tracing
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+
+# Required for Langfuse (OTel receiver)
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+
+# Optional: LangSmith (OTel receiver)
+LANGSMITH_API_KEY=ls-...
+LANGSMITH_PROJECT=cpr-game
+                        """)
+                        st.info("💡 **Tip**: Make sure the OpenTelemetry Collector is running: `docker-compose up -d`")
+                    
+                except Exception as e:
+                    error_msg = f"❌ Error running experiment: {str(e)}"
+                    status_text.error(error_msg)
+                    add_log(f"❌ ERROR: {error_msg}")
+                    add_log(f"Error type: {type(e).__name__}")
+                    
+                    st.error(error_msg)
+                    
+                    # Show error details
+                    with st.expander("🔍 View Full Error Details", expanded=True):
                         st.exception(e)
+                    
+                    # Show recent logs for debugging
+                    log_file_path = Path("logs/cpr_game.log")
+                    if log_file_path.exists():
+                        with st.expander("📋 View Recent Log File Contents (Last 50 lines)", expanded=False):
+                            try:
+                                with open(log_file_path, 'r') as f:
+                                    all_logs = f.readlines()
+                                    recent_logs = all_logs[-50:] if len(all_logs) > 50 else all_logs
+                                    st.code("".join(recent_logs), language=None)
+                            except Exception as log_err:
+                                st.warning(f"Could not read log file: {log_err}")
+                    
+                    logger.error(f"Experiment execution error: {e}", exc_info=True)
                 
                 # Clear config
                 if f"run_exp_config_{selected_exp_id}" in st.session_state:

@@ -76,15 +76,32 @@ COMPACT_PROMPTS: bool = True  # Use compact prompt format to reduce token usage
 USE_INCREMENTAL_PROMPTS: bool = False  # Use delta prompts (only send changes) - advanced optimization
 
 # ============================================================================
-# Langfuse Configuration
+# OpenTelemetry Configuration (Single Source of Truth)
 # ============================================================================
 
-# API Settings (set via environment variables)
+# OTel Settings (set via environment variables)
+OTEL_SERVICE_NAME: str = os.getenv("OTEL_SERVICE_NAME", "cpr-game")
+OTEL_ENDPOINT: str = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+OTEL_PROTOCOL: str = os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")  # "grpc" or "http/protobuf"
+OTEL_ENABLED: bool = os.getenv("OTEL_ENABLED", "true").lower() == "true"
+OTEL_SERVICE_VERSION: str = os.getenv("OTEL_SERVICE_VERSION", "1.0.0")
+
+# OpenTelemetry Receiver Selection
+# Controls which receiver(s) receive traces: "langfuse", "langsmith", or "both"
+OTEL_RECEIVER: str = os.getenv("OTEL_RECEIVER", "both").lower()
+
+# Langfuse as OTel Receiver
+LANGFUSE_OTEL_ENABLED: bool = True
 LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
-LANGFUSE_HOST: str = "https://cloud.langfuse.com"
+LANGFUSE_OTEL_ENDPOINT: str = "https://cloud.langfuse.com/api/public/otel"
+LANGFUSE_HOST: str = "https://cloud.langfuse.com"  # Legacy, kept for backward compatibility
 
-# Langfuse is always required - no enabled flag needed
+# LangSmith as OTel Receiver
+LANGSMITH_OTEL_ENABLED: bool = True
+LANGSMITH_API_KEY: str = os.getenv("LANGSMITH_API_KEY", "")
+LANGSMITH_PROJECT: str = os.getenv("LANGSMITH_PROJECT", "cpr-game")
+LANGSMITH_ENDPOINT: str = os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
 
 # Trace Settings
 LOG_LEVEL: str = "detailed"  # "minimal", "standard", "detailed"
@@ -185,10 +202,33 @@ CONFIG: Dict = {
     "compact_prompts": COMPACT_PROMPTS,
     "use_incremental_prompts": USE_INCREMENTAL_PROMPTS,
 
-    # Langfuse (always required)
+    # OpenTelemetry (Single Source of Truth)
+    "otel_enabled": OTEL_ENABLED,
+    "otel_service_name": OTEL_SERVICE_NAME,
+    "otel_endpoint": OTEL_ENDPOINT,
+    "otel_protocol": OTEL_PROTOCOL,
+    "otel_service_version": OTEL_SERVICE_VERSION,
+    "otel_receiver": OTEL_RECEIVER,  # Which receiver(s) to use: "langfuse", "langsmith", or "both"
+    "otel_resource_attributes": {
+        "service.name": OTEL_SERVICE_NAME,
+        "service.version": OTEL_SERVICE_VERSION,
+        "deployment.environment": os.getenv("DEPLOYMENT_ENVIRONMENT", "development"),
+    },
+    
+    # Langfuse (OTel Receiver - API keys for authentication)
     "langfuse_public_key": LANGFUSE_PUBLIC_KEY,
     "langfuse_secret_key": LANGFUSE_SECRET_KEY,
-    "langfuse_host": LANGFUSE_HOST,
+    "langfuse_host": LANGFUSE_HOST,  # Legacy
+    "langfuse_otel_enabled": LANGFUSE_OTEL_ENABLED,
+    "langfuse_otel_endpoint": LANGFUSE_OTEL_ENDPOINT,
+    
+    # LangSmith (OTel Receiver)
+    "langsmith_otel_enabled": LANGSMITH_OTEL_ENABLED,
+    "langsmith_api_key": LANGSMITH_API_KEY,
+    "langsmith_project": LANGSMITH_PROJECT,
+    "langsmith_endpoint": LANGSMITH_ENDPOINT,
+    
+    # Trace Settings
     "log_level": LOG_LEVEL,
     "log_llm_prompts": LOG_LLM_PROMPTS,
     "log_llm_responses": LOG_LLM_RESPONSES,
@@ -217,7 +257,7 @@ CONFIG: Dict = {
     "log_dir": "logs",
     
     # Database
-    "db_path": "data/game_results.duckdb",
+    "db_path": "data/game_results.db",
     "db_enabled": True,
 }
 
@@ -264,15 +304,39 @@ def validate_config(config: Dict) -> bool:
     if len(config["player_personas"]) < config["n_players"]:
         raise ValueError(f"Not enough personas defined for {config['n_players']} players")
 
-    # Langfuse is required - check that keys are provided
-    public_key = config.get("langfuse_public_key", "")
-    secret_key = config.get("langfuse_secret_key", "")
-    
-    # Check if keys are actually provided (not just empty strings)
-    if not public_key or not secret_key:
-        raise ValueError(
-            "Langfuse API keys are required. Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY environment variables, "
-            "or provide langfuse_public_key and langfuse_secret_key in config."
-        )
+    # OpenTelemetry is required - check configuration
+    if config.get("otel_enabled", True):
+        endpoint = config.get("otel_endpoint", "")
+        if not endpoint:
+            raise ValueError(
+                "OpenTelemetry endpoint is required. Set OTEL_EXPORTER_OTLP_ENDPOINT environment variable "
+                "or provide otel_endpoint in config."
+            )
+        
+        # Validate OTEL_RECEIVER and check required API keys
+        receiver = config.get("otel_receiver", "both").lower()
+        if receiver not in ["langfuse", "langsmith", "both"]:
+            raise ValueError(
+                f"Invalid OTEL_RECEIVER value: {receiver}. Must be one of: 'langfuse', 'langsmith', 'both'"
+            )
+        
+        # Check Langfuse keys if receiver includes Langfuse
+        if receiver in ["langfuse", "both"]:
+            public_key = config.get("langfuse_public_key", "")
+            secret_key = config.get("langfuse_secret_key", "")
+            if not public_key or not secret_key:
+                raise ValueError(
+                    "Langfuse API keys are required when OTEL_RECEIVER includes 'langfuse'. "
+                    "Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY environment variables."
+                )
+        
+        # Check LangSmith keys if receiver includes LangSmith
+        if receiver in ["langsmith", "both"]:
+            api_key = config.get("langsmith_api_key", "")
+            if not api_key:
+                raise ValueError(
+                    "LangSmith API key is required when OTEL_RECEIVER includes 'langsmith'. "
+                    "Set LANGSMITH_API_KEY environment variable."
+                )
 
     return True

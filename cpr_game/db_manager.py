@@ -1,11 +1,11 @@
-"""Database manager for storing game results in DuckDB.
+"""Database manager for storing game results in SQLite.
 
 Provides persistent storage for game run data including player results,
 personas, models, and rewards.
 """
 
 from typing import Dict, List, Optional
-import duckdb
+import sqlite3
 from pathlib import Path
 import json
 import uuid
@@ -17,12 +17,13 @@ logger = get_logger(__name__)
 
 
 class DatabaseManager:
-    """Manages DuckDB database for storing game results.
+    """Manages SQLite database for storing game results.
     
     Creates and maintains a database table to store per-player game results
     including game_id, player_id, persona, model, and total_reward.
     
     Supports both read-only and read-write connections for concurrent access.
+    Uses WAL (Write-Ahead Logging) mode for better concurrency.
     """
 
     def __init__(
@@ -34,8 +35,8 @@ class DatabaseManager:
         """Initialize database manager.
         
         Args:
-            db_path: Path to DuckDB database file. If None, uses default:
-                     data/game_results.duckdb
+            db_path: Path to SQLite database file. If None, uses default:
+                     data/game_results.db
             enabled: Whether database saving is enabled (default: True)
             access_mode: Connection access mode - 'READ_ONLY' or 'READ_WRITE' (default: 'READ_WRITE')
         """
@@ -51,7 +52,7 @@ class DatabaseManager:
         
         # Set default database path
         if db_path is None:
-            db_path = "data/game_results.duckdb"
+            db_path = "data/game_results.db"
         
         self.db_path = db_path
         
@@ -60,11 +61,31 @@ class DatabaseManager:
             db_file = Path(db_path)
             db_file.parent.mkdir(parents=True, exist_ok=True)
         
-        # Connect to DuckDB
+        # Connect to SQLite
         try:
-            # Convert access_mode to read_only boolean
             read_only = (access_mode == 'READ_ONLY')
-            self.conn = duckdb.connect(db_path, read_only=read_only)
+            
+            if read_only:
+                # Read-only connection using URI mode
+                self.conn = sqlite3.connect(
+                    f"file:{db_path}?mode=ro",
+                    uri=True,
+                    check_same_thread=False
+                )
+            else:
+                # Read-write connection with timeout for automatic retry on locks
+                self.conn = sqlite3.connect(
+                    db_path,
+                    check_same_thread=False,
+                    timeout=5.0  # 5 second timeout for busy retries
+                )
+                # Enable WAL mode for better concurrency
+                self.conn.execute("PRAGMA journal_mode=WAL")
+                # Set busy timeout (in milliseconds) for automatic retries
+                self.conn.execute("PRAGMA busy_timeout=5000")
+                # Optimize for better performance with WAL mode
+                self.conn.execute("PRAGMA synchronous=NORMAL")
+            
             self.read_only_conn = None  # Lazy initialization for read-only connection
             
             # Only create tables if in write mode
@@ -79,6 +100,50 @@ class DatabaseManager:
             self.read_only_conn = None
             self.enabled = False
 
+    def _column_exists(self, table_name: str, column_name: str) -> bool:
+        """Check if a column exists in a table.
+        
+        Args:
+            table_name: Name of the table
+            column_name: Name of the column to check
+            
+        Returns:
+            True if column exists, False otherwise
+        """
+        if not self.enabled or self.conn is None:
+            return False
+        
+        try:
+            # PRAGMA table_info returns: (cid, name, type, notnull, default_value, pk)
+            cursor = self.conn.execute(f"PRAGMA table_info({table_name})")
+            columns = cursor.fetchall()
+            column_names = [col[1] for col in columns]  # Column name is at index 1
+            return column_name in column_names
+        except Exception:
+            return False
+
+    def _table_exists(self, table_name: str) -> bool:
+        """Check if a table exists.
+        
+        Args:
+            table_name: Name of the table to check
+            
+        Returns:
+            True if table exists, False otherwise
+        """
+        if not self.enabled or self.conn is None:
+            return False
+        
+        try:
+            # Check sqlite_master for the table
+            cursor = self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                [table_name]
+            )
+            return cursor.fetchone() is not None
+        except Exception:
+            return False
+
     def _create_table(self):
         """Create game_results table if it doesn't exist."""
         if not self.enabled or self.conn is None:
@@ -92,7 +157,7 @@ class DatabaseManager:
                     player_uuid TEXT,
                     persona TEXT NOT NULL,
                     model TEXT NOT NULL,
-                    total_reward DOUBLE NOT NULL,
+                    total_reward REAL NOT NULL,
                     experiment_id TEXT,
                     timestamp TIMESTAMP,
                     PRIMARY KEY (game_id, player_id)
@@ -100,34 +165,36 @@ class DatabaseManager:
             """)
             
             # Add new columns if they don't exist (for migration from old schema)
-            try:
-                self.conn.execute("ALTER TABLE game_results ADD COLUMN IF NOT EXISTS experiment_id TEXT")
-            except Exception:
-                pass  # Column might already exist or error is expected
+            # SQLite doesn't support IF NOT EXISTS in ALTER TABLE, so check first
+            if not self._column_exists("game_results", "experiment_id"):
+                try:
+                    self.conn.execute("ALTER TABLE game_results ADD COLUMN experiment_id TEXT")
+                except Exception:
+                    pass  # Column might already exist or error is expected
             
-            try:
-                self.conn.execute("ALTER TABLE game_results ADD COLUMN IF NOT EXISTS timestamp TIMESTAMP")
-            except Exception:
-                pass  # Column might already exist or error is expected
+            if not self._column_exists("game_results", "timestamp"):
+                try:
+                    self.conn.execute("ALTER TABLE game_results ADD COLUMN timestamp TIMESTAMP")
+                except Exception:
+                    pass  # Column might already exist or error is expected
             
-            try:
-                self.conn.execute("ALTER TABLE game_results ADD COLUMN IF NOT EXISTS player_uuid TEXT")
-            except Exception:
-                pass  # Column might already exist or error is expected
+            if not self._column_exists("game_results", "player_uuid"):
+                try:
+                    self.conn.execute("ALTER TABLE game_results ADD COLUMN player_uuid TEXT")
+                except Exception:
+                    pass  # Column might already exist or error is expected
             
             # Check if experiments table exists and what columns it has
-            table_exists = False
+            table_exists = self._table_exists("experiments")
             has_max_fishes = False
             has_Max_fish = False
-            try:
-                columns = self.conn.execute("DESCRIBE experiments").fetchall()
-                column_names = [col[0] for col in columns]
-                table_exists = True
+            if table_exists:
+                # PRAGMA table_info returns: (cid, name, type, notnull, default_value, pk)
+                cursor = self.conn.execute("PRAGMA table_info(experiments)")
+                columns = cursor.fetchall()
+                column_names = [col[1] for col in columns]  # Column name is at index 1
                 has_max_fishes = "max_fishes" in column_names
                 has_Max_fish = "Max_fish" in column_names
-            except Exception:
-                # Table doesn't exist yet
-                pass
             
             # Create experiment tables
             self.conn.execute("""
@@ -139,7 +206,7 @@ class DatabaseManager:
                     n_players INTEGER NOT NULL,
                     max_steps INTEGER NOT NULL,
                     initial_resource INTEGER NOT NULL,
-                    regeneration_rate DOUBLE NOT NULL,
+                    regeneration_rate REAL NOT NULL,
                     max_extraction INTEGER NOT NULL,
                     Max_fish INTEGER NOT NULL,
                     number_of_games INTEGER NOT NULL,
@@ -151,8 +218,9 @@ class DatabaseManager:
             if table_exists:
                 try:
                     # Re-check columns after CREATE TABLE (in case it was just created)
-                    columns = self.conn.execute("DESCRIBE experiments").fetchall()
-                    column_names = [col[0] for col in columns]
+                    cursor = self.conn.execute("PRAGMA table_info(experiments)")
+                    columns = cursor.fetchall()
+                    column_names = [col[1] for col in columns]  # Column name is at index 1
                     has_max_fishes = "max_fishes" in column_names
                     has_Max_fish = "Max_fish" in column_names
                     
@@ -175,30 +243,44 @@ class DatabaseManager:
                     # Continue anyway - might be a duplicate column error or rename might have already happened
             
             # Migration: Check if we need to add parameter columns
-            # Try to query one of the new columns to see if they exist
-            try:
-                self.conn.execute("SELECT n_players FROM experiments LIMIT 0")
-                # If we get here, new columns exist - no migration needed
-            except Exception:
+            # Check if columns exist using PRAGMA
+            needs_migration = False
+            if table_exists:
+                columns = self.conn.execute("PRAGMA table_info(experiments)").fetchall()
+                column_names = [col[1] for col in columns]  # Column name is at index 1
+                if "n_players" not in column_names:
+                    needs_migration = True
+            
+            if needs_migration:
                 # New columns don't exist - need to add them
                 logger.info("Migrating experiments table: adding parameter columns")
                 try:
-                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS n_players INTEGER")
-                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS max_steps INTEGER")
-                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS initial_resource INTEGER")
-                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS regeneration_rate DOUBLE")
-                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS max_extraction INTEGER")
-                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS Max_fish INTEGER")
-                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS number_of_games INTEGER")
-                    self.conn.execute("ALTER TABLE experiments ADD COLUMN IF NOT EXISTS number_of_players_per_game INTEGER")
+                    if not self._column_exists("experiments", "n_players"):
+                        self.conn.execute("ALTER TABLE experiments ADD COLUMN n_players INTEGER")
+                    if not self._column_exists("experiments", "max_steps"):
+                        self.conn.execute("ALTER TABLE experiments ADD COLUMN max_steps INTEGER")
+                    if not self._column_exists("experiments", "initial_resource"):
+                        self.conn.execute("ALTER TABLE experiments ADD COLUMN initial_resource INTEGER")
+                    if not self._column_exists("experiments", "regeneration_rate"):
+                        self.conn.execute("ALTER TABLE experiments ADD COLUMN regeneration_rate REAL")
+                    if not self._column_exists("experiments", "max_extraction"):
+                        self.conn.execute("ALTER TABLE experiments ADD COLUMN max_extraction INTEGER")
+                    if not self._column_exists("experiments", "Max_fish"):
+                        self.conn.execute("ALTER TABLE experiments ADD COLUMN Max_fish INTEGER")
+                    if not self._column_exists("experiments", "number_of_games"):
+                        self.conn.execute("ALTER TABLE experiments ADD COLUMN number_of_games INTEGER")
+                    if not self._column_exists("experiments", "number_of_players_per_game"):
+                        self.conn.execute("ALTER TABLE experiments ADD COLUMN number_of_players_per_game INTEGER")
                     
                     # Try to migrate existing data from JSON to columns (if any exists)
                     try:
                         # Check if parameters column exists
-                        columns = self.conn.execute("DESCRIBE experiments").fetchall()
-                        column_names = [col[0] for col in columns]
+                        cursor = self.conn.execute("PRAGMA table_info(experiments)")
+                        columns = cursor.fetchall()
+                        column_names = [col[1] for col in columns]  # Column name is at index 1
                         if "parameters" in column_names:
-                            existing = self.conn.execute("SELECT experiment_id, parameters FROM experiments WHERE parameters IS NOT NULL").fetchall()
+                            cursor = self.conn.execute("SELECT experiment_id, parameters FROM experiments WHERE parameters IS NOT NULL")
+                            existing = cursor.fetchall()
                             for exp_id, params_json in existing:
                                 try:
                                     params = json.loads(params_json)
@@ -247,27 +329,28 @@ class DatabaseManager:
             """)
             
             # Add player_uuid column if it doesn't exist (for migration)
-            try:
-                self.conn.execute("ALTER TABLE experiment_players ADD COLUMN IF NOT EXISTS player_uuid TEXT")
-                # Generate UUIDs for existing players that don't have them
-                # DuckDB doesn't have gen_random_uuid(), so we'll generate in Python
-                existing_players = self.conn.execute("""
-                    SELECT experiment_id, player_index 
-                    FROM experiment_players 
-                    WHERE player_uuid IS NULL OR player_uuid = ''
-                """).fetchall()
-                for exp_id, player_idx in existing_players:
-                    new_uuid = str(uuid.uuid4())
-                    self.conn.execute("""
-                        UPDATE experiment_players 
-                        SET player_uuid = ? 
-                        WHERE experiment_id = ? AND player_index = ?
-                    """, (new_uuid, exp_id, player_idx))
-                # Note: DuckDB doesn't support ALTER COLUMN SET NOT NULL directly,
-                # so we'll handle NULLs in application code for now
-            except Exception as e:
-                logger.debug(f"Migration note (may be expected): {e}")
-                pass  # Column might already exist or error is expected
+            if not self._column_exists("experiment_players", "player_uuid"):
+                try:
+                    self.conn.execute("ALTER TABLE experiment_players ADD COLUMN player_uuid TEXT")
+                    # Generate UUIDs for existing players that don't have them
+                    # SQLite doesn't have gen_random_uuid(), so we'll generate in Python
+                    existing_players = self.conn.execute("""
+                        SELECT experiment_id, player_index 
+                        FROM experiment_players 
+                        WHERE player_uuid IS NULL OR player_uuid = ''
+                    """).fetchall()
+                    for exp_id, player_idx in existing_players:
+                        new_uuid = str(uuid.uuid4())
+                        self.conn.execute("""
+                            UPDATE experiment_players 
+                            SET player_uuid = ? 
+                            WHERE experiment_id = ? AND player_index = ?
+                        """, (new_uuid, exp_id, player_idx))
+                    # Note: SQLite doesn't support ALTER COLUMN SET NOT NULL directly,
+                    # so we'll handle NULLs in application code for now
+                except Exception as e:
+                    logger.debug(f"Migration note (may be expected): {e}")
+                    pass  # Column might already exist or error is expected
             
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS experiment_results (
@@ -289,7 +372,7 @@ class DatabaseManager:
                     player_index INTEGER NOT NULL,
                     persona TEXT NOT NULL,
                     model TEXT NOT NULL,
-                    total_reward DOUBLE NOT NULL,
+                    total_reward REAL NOT NULL,
                     timestamp TIMESTAMP NOT NULL,
                     PRIMARY KEY (experiment_id, game_id, player_uuid),
                     FOREIGN KEY (experiment_id) REFERENCES experiments(experiment_id)
@@ -297,15 +380,18 @@ class DatabaseManager:
             """)
             
             # Add new columns if they don't exist (for migration from old schema)
-            try:
-                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS winning_player_uuid TEXT")
-            except Exception:
-                pass  # Column might already exist or error is expected
+            # SQLite doesn't support IF NOT EXISTS in ALTER TABLE, so check first
+            if not self._column_exists("experiment_results", "winning_player_uuid"):
+                try:
+                    self.conn.execute("ALTER TABLE experiment_results ADD COLUMN winning_player_uuid TEXT")
+                except Exception:
+                    pass  # Column might already exist or error is expected
             
             # Migration: Rename winning_player_id to winning_player_uuid if old column exists
             try:
-                columns = self.conn.execute("DESCRIBE experiment_results").fetchall()
-                column_names = [col[0] for col in columns]
+                cursor = self.conn.execute("PRAGMA table_info(experiment_results)")
+                columns = cursor.fetchall()
+                column_names = [col[1] for col in columns]  # Column name is at index 1
                 if "winning_player_id" in column_names and "winning_player_uuid" not in column_names:
                     logger.info("Migrating: adding winning_player_uuid column")
                     # Add new column first
@@ -316,30 +402,35 @@ class DatabaseManager:
                 logger.debug(f"Migration note (may be expected): {e}")
                 pass
             
-            try:
-                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS winning_payoff DOUBLE")
-            except Exception:
-                pass
+            if not self._column_exists("experiment_results", "winning_payoff"):
+                try:
+                    self.conn.execute("ALTER TABLE experiment_results ADD COLUMN winning_payoff REAL")
+                except Exception:
+                    pass
             
-            try:
-                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS cumulative_payoff_sum DOUBLE")
-            except Exception:
-                pass
+            if not self._column_exists("experiment_results", "cumulative_payoff_sum"):
+                try:
+                    self.conn.execute("ALTER TABLE experiment_results ADD COLUMN cumulative_payoff_sum REAL")
+                except Exception:
+                    pass
             
-            try:
-                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS total_rounds INTEGER")
-            except Exception:
-                pass
+            if not self._column_exists("experiment_results", "total_rounds"):
+                try:
+                    self.conn.execute("ALTER TABLE experiment_results ADD COLUMN total_rounds INTEGER")
+                except Exception:
+                    pass
             
-            try:
-                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS final_resource_level DOUBLE")
-            except Exception:
-                pass
+            if not self._column_exists("experiment_results", "final_resource_level"):
+                try:
+                    self.conn.execute("ALTER TABLE experiment_results ADD COLUMN final_resource_level REAL")
+                except Exception:
+                    pass
             
-            try:
-                self.conn.execute("ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS tragedy_occurred BOOLEAN")
-            except Exception:
-                pass
+            if not self._column_exists("experiment_results", "tragedy_occurred"):
+                try:
+                    self.conn.execute("ALTER TABLE experiment_results ADD COLUMN tragedy_occurred BOOLEAN")
+                except Exception:
+                    pass
             
             logger.debug("Game results and experiment tables created or already exist")
         except Exception as e:
@@ -350,7 +441,7 @@ class DatabaseManager:
         """Get or create read-only connection for queries.
         
         Returns:
-            DuckDB connection in READ_ONLY mode
+            SQLite connection in READ_ONLY mode
         """
         if not self.enabled:
             return None
@@ -362,7 +453,11 @@ class DatabaseManager:
         # Otherwise, create a separate read-only connection
         if self.read_only_conn is None:
             try:
-                self.read_only_conn = duckdb.connect(self.db_path, read_only=True)
+                self.read_only_conn = sqlite3.connect(
+                    f"file:{self.db_path}?mode=ro",
+                    uri=True,
+                    check_same_thread=False
+                )
                 logger.debug("Created read-only connection for queries")
             except Exception as e:
                 logger.warning(f"Failed to create read-only connection: {e}, falling back to main connection")
@@ -374,7 +469,7 @@ class DatabaseManager:
         """Get write connection for INSERT/UPDATE/DELETE operations.
         
         Returns:
-            DuckDB connection in READ_WRITE mode
+            SQLite connection in READ_WRITE mode
         """
         if not self.enabled:
             return None
@@ -387,6 +482,9 @@ class DatabaseManager:
 
     def _execute_write_with_retry(self, operation, max_retries=3, retry_delay=0.5):
         """Execute a write operation with retry logic for lock conflicts.
+        
+        Note: SQLite's busy_timeout handles most retries automatically,
+        but this method provides additional retry logic for edge cases.
         
         Args:
             operation: Callable that performs the write operation
@@ -403,10 +501,10 @@ class DatabaseManager:
         for attempt in range(max_retries):
             try:
                 return operation(conn)
-            except Exception as e:
+            except sqlite3.OperationalError as e:
                 error_msg = str(e).lower()
-                # Check if it's a lock-related error
-                if 'lock' in error_msg or 'locked' in error_msg or 'conflicting' in error_msg:
+                # Check if it's a lock-related error (SQLite uses "database is locked")
+                if 'lock' in error_msg or 'locked' in error_msg or 'busy' in error_msg:
                     if attempt < max_retries - 1:
                         logger.warning(
                             f"Database locked, retrying in {retry_delay}s "
@@ -420,6 +518,9 @@ class DatabaseManager:
                 else:
                     # Not a lock error, re-raise immediately
                     raise
+            except Exception as e:
+                # For non-OperationalError exceptions, re-raise immediately
+                raise
         
         return None
 
@@ -511,11 +612,13 @@ class DatabaseManager:
             
             # Verify the save was successful (use read connection for verification)
             read_conn = self.get_read_connection()
+            verify_count = 0
             if read_conn:
-                verify_count = read_conn.execute(
+                cursor = read_conn.execute(
                     "SELECT COUNT(*) FROM game_results WHERE game_id = ?",
                     [game_id]
-                ).fetchone()[0]
+                )
+                verify_count = cursor.fetchone()[0]
             
             if verify_count != len(rows):
                 logger.warning(
@@ -557,10 +660,10 @@ class DatabaseManager:
         
         try:
             if parameters:
-                result = conn.execute(query, parameters)
+                cursor = conn.execute(query, parameters)
             else:
-                result = conn.execute(query)
-            return result.fetchall()
+                cursor = conn.execute(query)
+            return cursor.fetchall()
         except Exception as e:
             logger.error(f"Query failed: {e}", exc_info=True)
             return []
@@ -590,10 +693,11 @@ class DatabaseManager:
             return False
         
         try:
-            result = conn.execute(
+            cursor = conn.execute(
                 "SELECT COUNT(*) FROM game_results WHERE game_id = ?",
                 [game_id]
-            ).fetchone()
+            )
+            result = cursor.fetchone()
             return result is not None and result[0] > 0
         except Exception as e:
             logger.error(f"Failed to verify game save: {e}", exc_info=True)
@@ -708,25 +812,19 @@ class DatabaseManager:
             max_extraction = parameters.get("max_extraction")
             Max_fish = parameters.get("Max_fish") or parameters.get("max_fishes", 1000)  # Support both, default 1000
             
+            # Get write connection
+            conn = self.get_write_connection()
+            if conn is None:
+                logger.warning("Cannot save experiment - no write connection available")
+                return False
+            
             # Check if old max_fishes column still exists (for migration compatibility)
-            has_max_fishes_col = False
-            try:
-                columns = conn.execute("DESCRIBE experiments").fetchall()
-                column_names = [col[0] for col in columns]
-                has_max_fishes_col = "max_fishes" in column_names
-            except Exception:
-                pass
+            has_max_fishes_col = self._column_exists("experiments", "max_fishes")
             number_of_games = parameters.get("number_of_games")
             number_of_players_per_game = parameters.get("number_of_players_per_game")
             
             # Check if parameters column exists (for migration compatibility)
-            has_old_parameters_column = False
-            try:
-                columns = conn.execute("DESCRIBE experiments").fetchall()
-                column_names = [col[0] for col in columns]
-                has_old_parameters_column = "parameters" in column_names
-            except Exception:
-                pass
+            has_old_parameters_column = self._column_exists("experiments", "parameters")
             
             # Build INSERT statement - handle migration columns (parameters, max_fishes)
             # If old columns exist, we need to include them to satisfy NOT NULL constraints
@@ -826,12 +924,13 @@ class DatabaseManager:
         try:
             # Try to load with new schema (parameter columns)
             try:
-                exp_result = conn.execute("""
+                cursor = conn.execute("""
                     SELECT name, status, created_at,
                            n_players, max_steps, initial_resource, regeneration_rate,
                            max_extraction, Max_fish, number_of_games, number_of_players_per_game
                     FROM experiments WHERE experiment_id = ?
-                """, [experiment_id]).fetchone()
+                """, [experiment_id])
+                exp_result = cursor.fetchone()
                 
                 if exp_result is None:
                     return None
@@ -840,10 +939,11 @@ class DatabaseManager:
                     max_extraction, Max_fish, number_of_games, number_of_players_per_game = exp_result
             except Exception:
                 # Fallback to old schema (parameters JSON column)
-                exp_result = conn.execute(
+                cursor = conn.execute(
                     "SELECT name, status, created_at, parameters FROM experiments WHERE experiment_id = ?",
                     [experiment_id]
-                ).fetchone()
+                )
+                exp_result = cursor.fetchone()
                 
                 if exp_result is None:
                     return None
@@ -874,13 +974,14 @@ class DatabaseManager:
             # Load players (with UUIDs)
             try:
                 # Try new schema with player_uuid
-                player_results = conn.execute(
+                cursor = conn.execute(
                     """SELECT player_index, player_uuid, persona, model 
                        FROM experiment_players 
                        WHERE experiment_id = ? 
                        ORDER BY player_index""",
                     [experiment_id]
-                ).fetchall()
+                )
+                player_results = cursor.fetchall()
                 
                 players = [
                     {"player_uuid": player_uuid, "persona": persona, "model": model}
@@ -888,13 +989,14 @@ class DatabaseManager:
                 ]
             except Exception:
                 # Fallback to old schema (without UUIDs) - generate UUIDs on the fly
-                player_results = conn.execute(
+                cursor = conn.execute(
                     """SELECT player_index, persona, model 
                        FROM experiment_players 
                        WHERE experiment_id = ? 
                        ORDER BY player_index""",
                     [experiment_id]
-                ).fetchall()
+                )
+                player_results = cursor.fetchall()
                 
                 players = [
                     {"player_uuid": str(uuid.uuid4()), "persona": persona, "model": model}
@@ -930,7 +1032,7 @@ class DatabaseManager:
             return []
         
         try:
-            results = conn.execute("""
+            cursor = conn.execute("""
                 SELECT 
                     e.experiment_id,
                     e.name,
@@ -943,7 +1045,8 @@ class DatabaseManager:
                 LEFT JOIN experiment_results er ON e.experiment_id = er.experiment_id
                 GROUP BY e.experiment_id, e.name, e.status, e.created_at
                 ORDER BY e.created_at DESC
-            """).fetchall()
+            """)
+            results = cursor.fetchall()
             
             experiments = []
             for row in results:
@@ -994,6 +1097,37 @@ class DatabaseManager:
             logger.error(f"Failed to update experiment status: {e}", exc_info=True)
             return False
 
+    def reset_all_experiments_to_pending(self) -> int:
+        """Reset all experiments to 'pending' status.
+        
+        Useful for resetting stuck or completed experiments to be reprocessed.
+        
+        Returns:
+            Number of experiments that were reset, or -1 if failed
+        """
+        if not self.enabled:
+            logger.warning("Database is not enabled")
+            return -1
+        
+        conn = self.get_write_connection()
+        if conn is None:
+            logger.warning("Cannot reset experiments - no write connection available")
+            return -1
+        
+        try:
+            cursor = conn.execute(
+                "UPDATE experiments SET status = 'pending' WHERE status != 'pending'",
+                []
+            )
+            rows_affected = cursor.rowcount
+            conn.commit()
+            logger.info(f"Reset {rows_affected} experiments to 'pending' status")
+            return rows_affected
+            
+        except Exception as e:
+            logger.error(f"Failed to reset experiments to pending: {e}", exc_info=True)
+            return -1
+
     def save_experiment_result(
         self,
         experiment_id: str,
@@ -1012,8 +1146,14 @@ class DatabaseManager:
         Returns:
             True if successful, False otherwise
         """
-        if not self.enabled or self.conn is None:
-            logger.warning("Database is not enabled or not initialized")
+        if not self.enabled:
+            logger.warning("Database is not enabled")
+            return False
+        
+        # Check if we can get a write connection (don't check self.conn directly 
+        # as it might be read-only, but get_write_connection will handle it)
+        if self.access_mode != 'READ_WRITE':
+            logger.warning("Database manager is in READ_ONLY mode, cannot save experiment result")
             return False
         
         try:
@@ -1054,6 +1194,12 @@ class DatabaseManager:
             if final_resource_level is not None:
                 final_resource_level = float(final_resource_level)
             tragedy_occurred = bool(tragedy_occurred)
+            
+            # Get write connection
+            conn = self.get_write_connection()
+            if conn is None:
+                logger.warning("Cannot save experiment result - no write connection available")
+                return False
             
             conn.execute("""
                 INSERT INTO experiment_results (
@@ -1144,10 +1290,11 @@ class DatabaseManager:
             return []
         
         try:
-            results = conn.execute(
+            cursor = conn.execute(
                 "SELECT game_id, summary, timestamp FROM experiment_results WHERE experiment_id = ? ORDER BY timestamp",
                 [experiment_id]
-            ).fetchall()
+            )
+            results = cursor.fetchall()
             
             game_results = []
             for game_id, summary_json, timestamp in results:
@@ -1187,7 +1334,7 @@ class DatabaseManager:
             return False
         
         try:
-            # Manual cascade delete (DuckDB doesn't support ON DELETE CASCADE)
+            # Manual cascade delete (SQLite supports ON DELETE CASCADE, but we do it manually for clarity)
             # Delete in order: results -> players -> experiment
             conn.execute(
                 "DELETE FROM experiment_results WHERE experiment_id = ?",
@@ -1230,8 +1377,9 @@ class DatabaseManager:
         
         try:
             # Check which column exists (winning_player_uuid or winning_player_id)
-            columns = conn.execute("DESCRIBE experiment_results").fetchall()
-            column_names = [col[0] for col in columns]
+            cursor = conn.execute("PRAGMA table_info(experiment_results)")
+            columns = cursor.fetchall()
+            column_names = [col[1] for col in columns]  # Column name is at index 1
             has_uuid_col = "winning_player_uuid" in column_names
             has_id_col = "winning_player_id" in column_names
             
@@ -1244,10 +1392,11 @@ class DatabaseManager:
                 # Fallback if neither exists
                 select_cols = "game_id, summary, timestamp, winning_payoff, cumulative_payoff_sum, total_rounds, final_resource_level, tragedy_occurred"
             
-            result = conn.execute(
+            cursor = conn.execute(
                 f"SELECT {select_cols} FROM experiment_results WHERE experiment_id = ? AND game_id = ?",
                 [experiment_id, game_id]
-            ).fetchone()
+            )
+            result = cursor.fetchone()
             
             if result is None:
                 return None
@@ -1307,13 +1456,14 @@ class DatabaseManager:
             return []
         
         try:
-            results = conn.execute(
+            cursor = conn.execute(
                 """SELECT player_uuid, player_index, persona, model, total_reward, timestamp
                    FROM experiment_game_players
                    WHERE experiment_id = ? AND game_id = ?
                    ORDER BY player_index""",
                 [experiment_id, game_id]
-            ).fetchall()
+            )
+            results = cursor.fetchall()
             
             players = []
             for player_uuid, player_index, persona, model, total_reward, timestamp in results:

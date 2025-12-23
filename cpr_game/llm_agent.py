@@ -17,7 +17,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from .config import CONFIG
 from .utils import validate_action
 from .logger_setup import get_logger
-from .api_logger import APILogger
 from .agent_prompts import build_game_prompt, build_delta_prompt
 from .persona_prompts import GAME_RULES_PROMPT
 
@@ -104,10 +103,6 @@ class LLMAgent:
             timeout=self.timeout,
             api_key=api_key
         ).with_structured_output(AgentResponse)
-
-        # Initialize API logger
-        log_dir = self.config.get("log_dir", "logs")
-        self.api_logger = APILogger(log_dir=log_dir)
 
         # Memory
         self.observation_history: List[Dict] = []
@@ -227,24 +222,6 @@ class LLMAgent:
             api_metrics["success"] = True
             api_metrics["latency"] = time.time() - start_time
             
-            # Log successful API call
-            self.api_logger.log_api_call(
-                player_id=self.player_id,
-                model=self.llm_model,
-                prompt=prompt,
-                response=response_text,
-                prompt_tokens=api_metrics["prompt_tokens"],
-                completion_tokens=api_metrics["completion_tokens"],
-                total_tokens=api_metrics["total_tokens"],
-                latency=api_metrics["latency"],
-                success=True,
-                metadata={
-                    "temperature": self.temperature,
-                    "max_tokens": self.max_tokens,
-                    "persona": self.persona,
-                }
-            )
-            
             logger.info(
                 f"Player {self.player_id}: API call successful | "
                 f"Tokens: {api_metrics['total_tokens']} | "
@@ -258,23 +235,6 @@ class LLMAgent:
             logger.error(
                 f"Player {self.player_id}: API error - {type(e).__name__}: {e}",
                 exc_info=True
-            )
-            
-            # Log failed API call
-            self.api_logger.log_api_call(
-                player_id=self.player_id,
-                model=self.llm_model,
-                prompt=prompt,
-                response=None,
-                latency=api_metrics["latency"],
-                success=False,
-                error=api_metrics["error"],
-                metadata={
-                    "temperature": self.temperature,
-                    "max_tokens": self.max_tokens,
-                    "persona": self.persona,
-                    "error_type": type(e).__name__,
-                }
             )
             
             # Store API metrics for retrieval
@@ -292,23 +252,6 @@ class LLMAgent:
                 exc_info=True
             )
             
-            # Log parsing error
-            self.api_logger.log_api_call(
-                player_id=self.player_id,
-                model=self.llm_model,
-                prompt=prompt,
-                response=None,
-                latency=api_metrics["latency"],
-                success=False,
-                error=api_metrics["error"],
-                metadata={
-                    "temperature": self.temperature,
-                    "max_tokens": self.max_tokens,
-                    "persona": self.persona,
-                    "error_type": "parsing_error",
-                }
-            )
-            
             # Store API metrics for retrieval
             self.last_api_metrics = api_metrics
             
@@ -323,23 +266,6 @@ class LLMAgent:
             logger.error(
                 f"Player {self.player_id}: Unexpected error calling LLM - {type(e).__name__}: {e}",
                 exc_info=True
-            )
-            
-            # Log unexpected error
-            self.api_logger.log_api_call(
-                player_id=self.player_id,
-                model=self.llm_model,
-                prompt=prompt,
-                response=None,
-                latency=api_metrics["latency"],
-                success=False,
-                error=api_metrics["error"],
-                metadata={
-                    "temperature": self.temperature,
-                    "max_tokens": self.max_tokens,
-                    "persona": self.persona,
-                    "error_type": "unexpected_error",
-                }
             )
             
             # Store API metrics for retrieval

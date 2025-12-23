@@ -138,20 +138,20 @@ class GameRunner:
         log_dir = self.config.get("log_dir", "logs")
         setup_logging(log_dir=log_dir)
         
-        # Initialize logging - Langfuse is required
-        logger.info("Initializing Langfuse logging...")
+        # Initialize logging - OpenTelemetry is the single source of truth
+        logger.info("Initializing OpenTelemetry logging...")
         try:
             self.logger = LoggingManager(self.config)
-            logger.info("✓ Langfuse client initialized successfully")
+            logger.info("✓ OpenTelemetry logging initialized successfully")
         except Exception as e:
-            logger.error(f"❌ ERROR: Failed to initialize Langfuse: {e}")
+            logger.error(f"❌ ERROR: Failed to initialize OpenTelemetry: {e}")
             raise
 
         # Initialize dashboard (optional)
         self.dashboard = Dashboard(self.config)
 
         # Initialize database manager
-        db_path = self.config.get("db_path", "data/game_results.duckdb")
+        db_path = self.config.get("db_path", "data/game_results.db")
         db_enabled = self.config.get("db_enabled", True)
         try:
             self.db_manager = DatabaseManager(db_path=db_path, enabled=db_enabled)

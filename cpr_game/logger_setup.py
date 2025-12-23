@@ -1,17 +1,17 @@
-"""Logging setup for CPR game.
+"""Application-level logging setup for CPR game.
 
-Provides a centralized logger configuration.
+This module configures Python's standard logging system for application-level
+logs (errors, info messages, debug output). All application logs from
+logger.info(), logger.error(), etc. go to both the log file and console.
 
-Logging Destinations:
+Purpose: Development and debugging
+Output:
     - logs/cpr_game.log: Main application log file (DEBUG level and above)
     - Console/stdout: Application logs (INFO level and above)
-    
-This module configures Python's standard logging system. All application
-logs (from logger.info(), logger.error(), etc.) go to both the log file
-and console output.
 
-For API-specific logging, see api_logger.py (writes to logs/api_calls.log).
-For Langfuse tracing, see logging_manager.py (sends to cloud service).
+For distributed tracing and observability (including API metrics), see
+logging_manager.py which uses OpenTelemetry to send traces to configured
+receivers (Langfuse/LangSmith).
 """
 
 import logging

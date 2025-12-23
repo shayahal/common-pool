@@ -1,76 +1,46 @@
-"""Langfuse logging integration for CPR game tracing and metrics.
+"""OpenTelemetry-based distributed tracing for CPR game observability.
 
-Provides hierarchical tracing of games, rounds, and LLM generations
-with custom metrics for research analysis.
+This module provides hierarchical tracing of games, rounds, and LLM generations
+using OpenTelemetry as the single source of truth. Traces are exported via OTLP
+to configured receivers (Langfuse, LangSmith, etc.) based on OTEL_RECEIVER
+configuration.
 
-Logging Destinations:
-    - Langfuse Cloud: Structured traces sent to Langfuse service
-      (requires LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
-    - In-memory storage: Round metrics, generation data, API metrics
-      (for dashboard display and analysis)
-    
-This module handles high-level game tracing for research purposes.
-For application-level logging, see logger_setup.py (writes to logs/cpr_game.log).
-For API call metrics, see api_logger.py (writes to logs/api_calls.log).
+Purpose: Distributed tracing for research and observability
+Output: OpenTelemetry traces → Selected receiver(s) (Langfuse/LangSmith)
+Note: API metrics (tokens, costs, latency) are captured via OpenTelemetry spans
+      and can be viewed in the configured receiver dashboards.
+
+For application-level logging (errors, info, debug), see logger_setup.py
+(writes to logs/cpr_game.log and console).
 """
 
 from typing import Dict, List, Optional, Any
 import time
 import logging
-import sys
-import io
-from contextlib import redirect_stderr
 from datetime import datetime
-from packaging import version
-import importlib.metadata
-
-from langfuse import Langfuse
+from opentelemetry import trace
 
 from .config import CONFIG
 from .logger_setup import get_logger
+from .otel_manager import OTelManager
 
 logger = get_logger(__name__)
 
-# Suppress Langfuse context warnings about missing spans
-# These are expected when logging at trace level without round spans
-langfuse_logger = logging.getLogger("langfuse")
-langfuse_logger.setLevel(logging.ERROR)  # Only show errors, suppress warnings about span context
-
-# Also suppress langfuse.decorators logger if it exists
-decorators_logger = logging.getLogger("langfuse.decorators")
-decorators_logger.setLevel(logging.ERROR)
-
-# Required Langfuse version - must match exactly
-REQUIRED_LANGFUSE_VERSION = "3.11.0"
-
-# Check Langfuse version at import time
-try:
-    installed_version = importlib.metadata.version("langfuse")
-    if version.parse(installed_version) != version.parse(REQUIRED_LANGFUSE_VERSION):
-        raise RuntimeError(
-            f"Incompatible langfuse version: {installed_version}. "
-            f"Required version: {REQUIRED_LANGFUSE_VERSION}. "
-            f"Please install the correct version: pip install langfuse=={REQUIRED_LANGFUSE_VERSION}"
-        )
-except importlib.metadata.PackageNotFoundError:
-    raise RuntimeError(
-        f"langfuse package is not installed. "
-        f"Please install: pip install langfuse=={REQUIRED_LANGFUSE_VERSION}"
-    )
-except Exception as e:
-    raise RuntimeError(
-        f"Error checking langfuse version: {e}. "
-        f"Please ensure langfuse=={REQUIRED_LANGFUSE_VERSION} is installed: pip install langfuse=={REQUIRED_LANGFUSE_VERSION}"
-    ) from e
-
 
 class LoggingManager:
-    """Manager for Langfuse tracing and metrics logging.
+    """Manager for OpenTelemetry tracing and metrics logging.
+
+    Uses OpenTelemetry as single source of truth. Traces are exported
+    via OTLP to configured receivers (Langfuse, LangSmith, etc.).
 
     Tracing structure:
-        Each player action in each round gets its own trace containing:
-        - Prompt sent to LLM
-        - Response received from LLM
+        Trace: game_{game_id}
+        ├── Span: game_setup
+        ├── Span: round_{round_num}
+        │   ├── Span: player_{player_id}_action
+        │   │   └── Span: llm_generation (auto-instrumented)
+        │   └── Span: round_metrics
+        └── Span: game_summary
     """
 
     def __init__(self, config: Optional[Dict] = None):
@@ -81,53 +51,21 @@ class LoggingManager:
         """
         self.config = config if config is not None else CONFIG
 
-        # Initialize client as None - will be set below if initialization succeeds
-        self.client = None
-
-        # Langfuse is required - initialize client and raise error if it fails
-        public_key = self.config.get("langfuse_public_key", "")
-        secret_key = self.config.get("langfuse_secret_key", "")
-
-        if not public_key or not secret_key:
-            raise ValueError(
-                "Langfuse API keys are required. Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY environment variables, "
-                "or provide langfuse_public_key and langfuse_secret_key in config."
-            )
-
+        # Initialize OpenTelemetry manager
         try:
-            langfuse_host = self.config.get("langfuse_host", "https://cloud.langfuse.com")
-            logger.info(f"Initializing Langfuse client with host: {langfuse_host}")
-
-            self.client = Langfuse(
-                public_key=public_key,
-                secret_key=secret_key,
-                host=langfuse_host
-            )
-
-            # Try a simple operation to verify the client works
-            logger.info("Langfuse client created, verifying connection...")
-            # Note: We don't check for methods here - if they don't exist,
-            # they'll raise AttributeError when we try to use them, which we handle below
-
-            logger.info("✓ Langfuse client initialized successfully")
-        except (ValueError, AttributeError, ConnectionError) as e:
-            error_msg = (
-                f"Failed to initialize Langfuse client: {e}. "
-                "Please check your Langfuse API keys and network connection."
-            )
-            logger.error(error_msg, exc_info=True)
-            raise RuntimeError(error_msg) from e
+            self.otel_manager = OTelManager(self.config)
+            self.tracer = self.otel_manager.get_tracer()
+            if self.tracer is None:
+                logger.warning("OpenTelemetry is disabled - tracing will be no-op")
         except Exception as e:
-            error_msg = (
-                f"Unexpected error initializing Langfuse client: {e}. "
-                "Please check your Langfuse configuration."
-            )
-            logger.error(error_msg, exc_info=True)
-            raise RuntimeError(error_msg) from e
+            logger.error(f"Failed to initialize OpenTelemetry: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to initialize OpenTelemetry: {e}") from e
 
         # Game tracking
         self.game_id = None
         self.current_round = 0
+        self.current_trace = None
+        self.current_round_span = None
 
         # Metrics accumulation (for dashboard/analysis only)
         self.round_metrics: List[Dict] = []
@@ -135,7 +73,7 @@ class LoggingManager:
         self.api_metrics_data: List[Dict] = []
 
     def start_game_trace(self, game_id: str, config: Dict) -> None:
-        """Initialize game tracking (no trace created).
+        """Initialize game tracking and create trace.
 
         Args:
             game_id: Unique identifier for this game
@@ -143,15 +81,64 @@ class LoggingManager:
         """
         self.game_id = game_id
         self.current_round = 0
-        logger.info(f"Starting game tracking for game_id: {game_id}")
+
+        if self.tracer is None:
+            logger.debug(f"OTel disabled - skipping trace creation for game_id: {game_id}")
+            return
+
+        try:
+            # Start root trace for the game
+            self.current_trace = self.tracer.start_as_current_span(
+                f"game_{game_id}",
+                attributes={
+                    "game.id": game_id,
+                    "game.n_players": config.get("n_players", 2),
+                    "game.max_steps": config.get("max_steps", 20),
+                    "game.initial_resource": config.get("initial_resource", 1000),
+                }
+            )
+            
+            # Create game_setup span
+            with self.tracer.start_as_current_span(
+                "game_setup",
+                attributes={
+                    "game.id": game_id,
+                    "game.config": str(config),
+                }
+            ) as setup_span:
+                setup_span.add_event("game.started")
+            
+            logger.info(f"Starting game tracking for game_id: {game_id}")
+        except Exception as e:
+            logger.error(f"Error starting game trace: {e}", exc_info=True)
+            # Don't raise - continue without tracing if it fails
 
     def set_current_round(self, round_num: int):
-        """Set the current round number for trace naming.
+        """Set the current round number and create round span.
 
         Args:
             round_num: Round number
         """
         self.current_round = round_num
+
+        if self.tracer is None:
+            return
+
+        try:
+            # End previous round span if exists
+            if self.current_round_span is not None:
+                self.current_round_span.end()
+
+            # Start new round span
+            self.current_round_span = self.tracer.start_as_current_span(
+                f"round_{round_num}",
+                attributes={
+                    "round.number": round_num,
+                    "game.id": self.game_id,
+                }
+            )
+        except Exception as e:
+            logger.warning(f"Error creating round span: {e}", exc_info=True)
 
     def log_generation(
         self,
@@ -164,7 +151,7 @@ class LoggingManager:
         api_metrics: Optional[Dict] = None,
         system_prompt: Optional[str] = None
     ):
-        """Log an LLM generation as a separate trace.
+        """Log an LLM generation as a span.
 
         Args:
             player_id: Player identifier
@@ -176,108 +163,112 @@ class LoggingManager:
             api_metrics: API call metrics (latency, tokens, cost, etc.)
             system_prompt: System prompt/instructions (optional)
         """
-        if not self.client:
-            raise RuntimeError("Langfuse client is not initialized. Cannot log generation.")
+        if self.tracer is None:
+            # Still store data for dashboard/metrics even if tracing is disabled
+            self._store_generation_data(player_id, prompt, response, action, reasoning, api_metrics)
+            return
 
         try:
-            # Create a unique trace name for this player action
-            trace_name = f"{self.game_id}_round_{self.current_round}_player_{player_id}"
-
-            # Format input as structured messages if system prompt is provided
-            # This allows Langfuse to properly display both system and user prompts
-            if self.config["log_llm_prompts"]:
-                if system_prompt:
-                    # Use structured message format for better display in Langfuse
-                    input_messages = [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                    ]
-                else:
-                    # Fallback to plain string if no system prompt
-                    input_messages = prompt
-            else:
-                input_messages = "[prompt hidden]"
-
-            # Use Langfuse 3.11.0 API: start_generation creates a generation
-            # that automatically creates its own parent trace
-            generation_params = {
-                "name": trace_name,
-                "model": self.config["llm_model"],
-                "input": input_messages,
-                "output": response if self.config["log_llm_responses"] else "[response hidden]",
-                "metadata": {
-                    "game_id": self.game_id,
-                    "round": self.current_round,
-                    "player_id": player_id,
-                    "action": action,
-                    "reasoning": reasoning or "",
-                }
+            span_name = f"player_{player_id}_action"
+            
+            # Create span attributes
+            attributes = {
+                "player.id": player_id,
+                "action.extraction": float(action),
+                "game.id": self.game_id,
+                "round.number": self.current_round,
             }
-
+            
+            if reasoning:
+                attributes["reasoning"] = reasoning[:500]  # Limit length
+            
+            # Add persona if available
+            if metadata and "persona" in metadata:
+                attributes["player.persona"] = metadata["persona"]
+            
+            # Add LLM model info
+            attributes["llm.model"] = self.config.get("llm_model", "unknown")
+            attributes["llm.temperature"] = self.config.get("llm_temperature", 0.7)
+            
             # Add token usage if available
             if api_metrics:
-                prompt_tokens = api_metrics.get("prompt_tokens")
-                completion_tokens = api_metrics.get("completion_tokens")
-                total_tokens = api_metrics.get("total_tokens")
+                if api_metrics.get("prompt_tokens") is not None:
+                    attributes["llm.prompt_tokens"] = int(api_metrics["prompt_tokens"])
+                if api_metrics.get("completion_tokens") is not None:
+                    attributes["llm.completion_tokens"] = int(api_metrics["completion_tokens"])
+                if api_metrics.get("total_tokens") is not None:
+                    attributes["llm.total_tokens"] = int(api_metrics["total_tokens"])
+                if api_metrics.get("latency") is not None:
+                    attributes["llm.latency_seconds"] = float(api_metrics["latency"])
+                if api_metrics.get("cost") is not None:
+                    attributes["llm.cost"] = float(api_metrics["cost"])
 
-                if prompt_tokens is not None or completion_tokens is not None or total_tokens is not None:
-                    usage_details = {}
-                    if prompt_tokens is not None:
-                        usage_details["promptTokens"] = int(prompt_tokens)
-                    if completion_tokens is not None:
-                        usage_details["completionTokens"] = int(completion_tokens)
-                    if total_tokens is not None:
-                        usage_details["totalTokens"] = int(total_tokens)
-
-                    if usage_details:
-                        generation_params["usage_details"] = usage_details
-
-            # Create generation using start_generation (automatically creates trace)
-            generation_obs = self.client.start_generation(**generation_params)
-
-            # End the observation immediately since we have all the data
-            if generation_obs and hasattr(generation_obs, 'end'):
-                generation_obs.end()
+            # Create player action span
+            with self.tracer.start_as_current_span(
+                span_name,
+                attributes=attributes
+            ) as player_span:
+                # Add events for prompt/response
+                if self.config.get("log_llm_prompts", True):
+                    if system_prompt:
+                        player_span.add_event("prompt.system", {"content": system_prompt[:1000]})
+                    player_span.add_event("prompt.user", {"content": prompt[:1000]})
+                
+                if self.config.get("log_llm_responses", True):
+                    player_span.add_event("response.received", {"content": response[:1000]})
+                
+                player_span.add_event("action.extracted", {"action": float(action)})
 
             # Debug log
             if api_metrics:
                 logger.info(
-                    f"✅ Logged trace to Langfuse: {trace_name} | "
+                    f"✅ Logged trace via OTel: {self.game_id}_round_{self.current_round}_player_{player_id} | "
                     f"Tokens: {api_metrics.get('total_tokens', 'N/A')} | "
                     f"Latency: {api_metrics.get('latency', 0):.2f}s | "
                     f"Cost: ${api_metrics.get('cost', 0):.4f}"
                 )
             else:
-                logger.debug(f"Logged trace to Langfuse: {trace_name}")
+                logger.debug(f"Logged trace via OTel: {self.game_id}_round_{self.current_round}_player_{player_id}")
 
             # Store for later analysis (dashboard/metrics)
-            self.generation_data.append({
-                "player_id": player_id,
-                "prompt": prompt,
-                "response": response,
-                "action": action,
-                "reasoning": reasoning,
-                "api_metrics": api_metrics,
-            })
+            self._store_generation_data(player_id, prompt, response, action, reasoning, api_metrics)
 
-            # Store API metrics separately
-            if api_metrics:
-                api_record = {
-                    "player_id": player_id,
-                    "timestamp": datetime.now().isoformat(),
-                    **api_metrics
-                }
-                self.api_metrics_data.append(api_record)
-
-        except (AttributeError, ValueError, ConnectionError) as e:
-            logger.error(f"Error logging generation: {e}", exc_info=True)
-            raise RuntimeError(f"Failed to log generation: {e}") from e
         except Exception as e:
-            logger.error(f"Unexpected error logging generation: {e}", exc_info=True)
-            raise RuntimeError(f"Unexpected error logging generation: {e}") from e
+            logger.error(f"Error logging generation: {e}", exc_info=True)
+            # Don't raise - continue even if tracing fails
+            # Still store data for dashboard/metrics
+            self._store_generation_data(player_id, prompt, response, action, reasoning, api_metrics)
+
+    def _store_generation_data(
+        self,
+        player_id: int,
+        prompt: str,
+        response: str,
+        action: float,
+        reasoning: Optional[str],
+        api_metrics: Optional[Dict]
+    ):
+        """Store generation data for dashboard/metrics (internal helper)."""
+        self.generation_data.append({
+            "player_id": player_id,
+            "prompt": prompt,
+            "response": response,
+            "action": action,
+            "reasoning": reasoning,
+            "api_metrics": api_metrics,
+        })
+
+        # Store API metrics separately
+        if api_metrics:
+            api_record = {
+                "player_id": player_id,
+                "timestamp": datetime.now().isoformat(),
+                **api_metrics
+            }
+            self.api_metrics_data.append(api_record)
 
     def log_round_metrics(self, round_num: int, metrics: Dict):
-        """Store metrics for a completed round (for dashboard only).
+        """Store metrics for a completed round and create metrics span.
 
         Args:
             round_num: Round number
@@ -287,23 +278,79 @@ class LoggingManager:
         metrics["round"] = round_num
         self.round_metrics.append(metrics)
 
-    def end_game_trace(self, summary: Dict):
-        """Finalize game and flush traces to Langfuse.
-
-        Args:
-            summary: Game summary statistics (stored locally only, not sent to Langfuse)
-        """
-        if not self.client:
-            raise RuntimeError("Langfuse client is not initialized. Cannot end game trace.")
+        if self.tracer is None:
+            return
 
         try:
-            # Flush all pending traces to Langfuse
-            logger.info("Flushing data to Langfuse...")
-            self.client.flush()
-            logger.info("✓ Successfully flushed all traces to Langfuse")
+            # Create round_metrics span
+            with self.tracer.start_as_current_span(
+                "round_metrics",
+                attributes={
+                    "round.number": round_num,
+                    "game.id": self.game_id,
+                    "resource.level": float(metrics.get("resource_level", 0)),
+                    "total.extraction": float(metrics.get("total_extraction", 0)),
+                    "cooperation.index": float(metrics.get("cooperation_index", 0)),
+                }
+            ) as metrics_span:
+                # Add individual extractions and payoffs as events
+                if "individual_extractions" in metrics:
+                    for i, extraction in enumerate(metrics["individual_extractions"]):
+                        metrics_span.add_event(
+                            "player.extraction",
+                            {"player_id": i, "extraction": float(extraction)}
+                        )
+                if "individual_payoffs" in metrics:
+                    for i, payoff in enumerate(metrics["individual_payoffs"]):
+                        metrics_span.add_event(
+                            "player.payoff",
+                            {"player_id": i, "payoff": float(payoff)}
+                        )
+        except Exception as e:
+            logger.warning(f"Error logging round metrics: {e}", exc_info=True)
+
+    def end_game_trace(self, summary: Dict):
+        """Finalize game and flush traces.
+
+        Args:
+            summary: Game summary statistics
+        """
+        if self.tracer is None:
+            logger.debug("OTel disabled - skipping trace finalization")
+            return
+
+        try:
+            # End current round span if exists
+            if self.current_round_span is not None:
+                self.current_round_span.end()
+                self.current_round_span = None
+
+            # Create game_summary span
+            with self.tracer.start_as_current_span(
+                "game_summary",
+                attributes={
+                    "game.id": self.game_id,
+                    "game.total_rounds": int(summary.get("total_rounds", 0)),
+                    "game.final_resource": float(summary.get("final_resource_level", 0)),
+                    "game.tragedy_occurred": bool(summary.get("tragedy_occurred", False)),
+                    "game.avg_cooperation_index": float(summary.get("avg_cooperation_index", 0)),
+                    "game.gini_coefficient": float(summary.get("gini_coefficient", 0)),
+                }
+            ) as summary_span:
+                summary_span.add_event("game.completed")
+
+            # End root trace
+            if self.current_trace is not None:
+                self.current_trace.end()
+                self.current_trace = None
+
+            # Flush all pending spans
+            logger.info("Flushing OTel traces...")
+            self.otel_manager.flush()
+            logger.info("✓ Successfully flushed all traces via OTel")
 
         except Exception as e:
-            logger.error(f"Error flushing to Langfuse: {e}", exc_info=True)
+            logger.error(f"Error ending game trace: {e}", exc_info=True)
             # Don't raise - we want to continue even if flush fails
 
     def get_round_metrics(self) -> List[Dict]:
@@ -334,22 +381,23 @@ class LoggingManager:
         """Reset manager state for new game."""
         self.game_id = None
         self.current_round = 0
+        self.current_trace = None
+        self.current_round_span = None
         self.round_metrics = []
         self.generation_data = []
         self.api_metrics_data = []
 
     def __del__(self):
         """Cleanup: flush any pending traces."""
-        if self.client:
+        if hasattr(self, 'otel_manager'):
             try:
-                self.client.flush()
+                self.otel_manager.flush()
             except Exception as e:
-                # Log error but don't raise during cleanup (destructor)
-                logger.warning(f"Error flushing logs during cleanup: {e}", exc_info=True)
+                logger.warning(f"Error flushing traces during cleanup: {e}", exc_info=True)
 
 
 class MockLoggingManager(LoggingManager):
-    """Mock logging manager for testing without Langfuse.
+    """Mock logging manager for testing without OpenTelemetry.
 
     Stores all logs in memory for inspection.
     """
@@ -357,7 +405,8 @@ class MockLoggingManager(LoggingManager):
     def __init__(self, config: Optional[Dict] = None):
         """Initialize mock manager."""
         self.config = config if config is not None else CONFIG
-        self.client = None  # Mock doesn't use Langfuse client
+        self.otel_manager = None
+        self.tracer = None
 
         # Mock storage
         self.traces = []
@@ -368,6 +417,8 @@ class MockLoggingManager(LoggingManager):
         self.api_metrics_data = []
         self.game_id = None
         self.current_round = 0
+        self.current_trace = None
+        self.current_round_span = None
 
     def start_game_trace(self, game_id: str, config: Dict) -> None:
         """Start mock game tracking."""
@@ -405,7 +456,7 @@ class MockLoggingManager(LoggingManager):
             "api_metrics": api_metrics,
         }
         self.generations.append(gen)
-        self.traces.append(gen)  # Each generation is its own trace now
+        self.traces.append(gen)
         self.generation_data.append(gen)
 
         # Store API metrics separately
@@ -436,3 +487,5 @@ class MockLoggingManager(LoggingManager):
         self.api_metrics_data = []
         self.traces = []
         self.generations = []
+        self.current_trace = None
+        self.current_round_span = None

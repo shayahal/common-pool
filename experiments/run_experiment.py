@@ -1,7 +1,13 @@
 """Run CPR game experiments with different configurations.
 
-This script demonstrates how to run systematic experiments exploring
-different game parameters and agent configurations.
+⚠️ DEPRECATED: This script is deprecated. Use the database-driven experiment system instead.
+
+For creating and running experiments, use:
+- `experiment_app.py` (Streamlit GUI) - Recommended
+- `main.py --experiment-id <id>` (CLI) - For programmatic execution
+
+This old system saves results to JSON files. The new system uses SQLite for better
+data management and querying. See README.md for current experiment workflow.
 """
 
 import sys

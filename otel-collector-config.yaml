@@ -1,0 +1,74 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+  resource:
+    attributes:
+      - key: service.name
+        value: cpr-game
+        action: upsert
+  attributes:
+    actions:
+      - key: game_id
+        from_attribute: game.id
+        action: insert
+
+exporters:
+  # ============================================================================
+  # Receiver Configuration Based on OTEL_RECEIVER
+  # ============================================================================
+  # 
+  # The OTEL_RECEIVER environment variable controls which receiver(s) receive traces:
+  # - "langfuse": Comment out LangSmith exporter and remove from pipelines
+  # - "langsmith": Comment out Langfuse exporter and remove from pipelines
+  # - "both": Use both exporters (default configuration below)
+  #
+  # To switch receivers:
+  # 1. Set OTEL_RECEIVER environment variable to desired value
+  # 2. Comment/uncomment the appropriate exporter(s) below
+  # 3. Update the exporters list in service.pipelines.traces
+  
+  # Langfuse as OTel receiver (HTTP exporter supports full URLs)
+  # Comment out if OTEL_RECEIVER="langsmith"
+  otlphttp/langfuse:
+    endpoint: https://cloud.langfuse.com/api/public/otel
+    headers:
+      x-langfuse-public-key: ${LANGFUSE_PUBLIC_KEY}
+      x-langfuse-secret-key: ${LANGFUSE_SECRET_KEY}
+    tls:
+      insecure: false
+
+  # LangSmith as OTel receiver (HTTP exporter supports full URLs)
+  # Comment out if OTEL_RECEIVER="langfuse"
+  otlphttp/langsmith:
+    endpoint: https://api.smith.langchain.com/otel
+    headers:
+      x-api-key: ${LANGSMITH_API_KEY}
+    tls:
+      insecure: false
+
+  # Optional: Long-term storage (uncomment if using Tempo)
+  # otlp/tempo:
+  #   endpoint: tempo:4317
+  #   tls:
+  #     insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, resource, attributes]
+      # Update exporters list based on OTEL_RECEIVER:
+      # - "langfuse": [otlphttp/langfuse]
+      # - "langsmith": [otlphttp/langsmith]
+      # - "both": [otlphttp/langfuse, otlphttp/langsmith] (current)
+      exporters: [otlphttp/langfuse, otlphttp/langsmith]
+
