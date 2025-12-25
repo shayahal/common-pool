@@ -122,8 +122,9 @@ class DatabaseManager:
             columns = cursor.fetchall()
             column_names = [col[1] for col in columns]  # Column name is at index 1
             return column_name in column_names
-        except Exception:
-            return False
+        except Exception as e:
+            logger.error(f"Error checking if column {column_name} exists in table {table_name}: {e}", exc_info=True)
+            raise
 
     def _table_exists(self, table_name: str) -> bool:
         """Check if a table exists.
@@ -144,8 +145,9 @@ class DatabaseManager:
                 [table_name]
             )
             return cursor.fetchone() is not None
-        except Exception:
-            return False
+        except Exception as e:
+            logger.error(f"Error checking if table {table_name} exists: {e}", exc_info=True)
+            raise
 
     def _create_table(self):
         """Create game_results table if it doesn't exist."""
@@ -172,20 +174,23 @@ class DatabaseManager:
             if not self._column_exists("game_results", "experiment_id"):
                 try:
                     self.conn.execute("ALTER TABLE game_results ADD COLUMN experiment_id TEXT")
-                except Exception:
-                    pass  # Column might already exist or error is expected
+                except Exception as e:
+                    logger.error(f"Failed to add column experiment_id to game_results: {e}", exc_info=True)
+                    raise
             
             if not self._column_exists("game_results", "timestamp"):
                 try:
                     self.conn.execute("ALTER TABLE game_results ADD COLUMN timestamp TIMESTAMP")
-                except Exception:
-                    pass  # Column might already exist or error is expected
+                except Exception as e:
+                    logger.error(f"Failed to add column timestamp to game_results: {e}", exc_info=True)
+                    raise
             
             if not self._column_exists("game_results", "player_uuid"):
                 try:
                     self.conn.execute("ALTER TABLE game_results ADD COLUMN player_uuid TEXT")
-                except Exception:
-                    pass  # Column might already exist or error is expected
+                except Exception as e:
+                    logger.error(f"Failed to add column player_uuid to game_results: {e}", exc_info=True)
+                    raise
             
             # Check if experiments table exists and what columns it has
             table_exists = self._table_exists("experiments")
@@ -387,8 +392,9 @@ class DatabaseManager:
             if not self._column_exists("experiment_results", "winning_player_uuid"):
                 try:
                     self.conn.execute("ALTER TABLE experiment_results ADD COLUMN winning_player_uuid TEXT")
-                except Exception:
-                    pass  # Column might already exist or error is expected
+                except Exception as e:
+                    logger.error(f"Failed to add column winning_player_uuid to experiment_results: {e}", exc_info=True)
+                    raise
             
             # Migration: Rename winning_player_id to winning_player_uuid if old column exists
             try:
@@ -402,38 +408,43 @@ class DatabaseManager:
                     # Data migration will happen in save_experiment_result based on selected_players
                     # Old winning_player_id column will be kept for backward compatibility for now
             except Exception as e:
-                logger.debug(f"Migration note (may be expected): {e}")
-                pass
+                logger.error(f"Error during migration check for winning_player_uuid: {e}", exc_info=True)
+                raise
             
             if not self._column_exists("experiment_results", "winning_payoff"):
                 try:
                     self.conn.execute("ALTER TABLE experiment_results ADD COLUMN winning_payoff REAL")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"Failed to add column winning_payoff to experiment_results: {e}", exc_info=True)
+                    raise
             
             if not self._column_exists("experiment_results", "cumulative_payoff_sum"):
                 try:
                     self.conn.execute("ALTER TABLE experiment_results ADD COLUMN cumulative_payoff_sum REAL")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"Failed to add column cumulative_payoff_sum to experiment_results: {e}", exc_info=True)
+                    raise
             
             if not self._column_exists("experiment_results", "total_rounds"):
                 try:
                     self.conn.execute("ALTER TABLE experiment_results ADD COLUMN total_rounds INTEGER")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"Failed to add column total_rounds to experiment_results: {e}", exc_info=True)
+                    raise
             
             if not self._column_exists("experiment_results", "final_resource_level"):
                 try:
                     self.conn.execute("ALTER TABLE experiment_results ADD COLUMN final_resource_level REAL")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"Failed to add column final_resource_level to experiment_results: {e}", exc_info=True)
+                    raise
             
             if not self._column_exists("experiment_results", "tragedy_occurred"):
                 try:
                     self.conn.execute("ALTER TABLE experiment_results ADD COLUMN tragedy_occurred BOOLEAN")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"Failed to add column tragedy_occurred to experiment_results: {e}", exc_info=True)
+                    raise
             
             logger.debug("Game results and experiment tables created or already exist")
         except Exception as e:
@@ -943,27 +954,32 @@ class DatabaseManager:
                 
                 name, status, created_at, n_players, max_steps, initial_resource, regeneration_rate, \
                     max_extraction, Max_fish, number_of_games, number_of_players_per_game = exp_result
-            except Exception:
+            except Exception as e:
                 # Fallback to old schema (parameters JSON column)
-                cursor = conn.execute(
-                    "SELECT name, status, created_at, parameters FROM experiments WHERE experiment_id = ?",
-                    [experiment_id]
-                )
-                exp_result = cursor.fetchone()
-                
-                if exp_result is None:
-                    return None
-                
-                name, status, created_at, parameters_json = exp_result
-                parameters_dict = json.loads(parameters_json)
-                n_players = parameters_dict.get("n_players")
-                max_steps = parameters_dict.get("max_steps")
-                initial_resource = parameters_dict.get("initial_resource")
-                regeneration_rate = parameters_dict.get("regeneration_rate")
-                max_extraction = parameters_dict.get("max_extraction")
-                Max_fish = parameters_dict.get("Max_fish") or parameters_dict.get("max_fishes", 1000)
-                number_of_games = parameters_dict.get("number_of_games")
-                number_of_players_per_game = parameters_dict.get("number_of_players_per_game")
+                logger.debug(f"Failed to load experiment with new schema, falling back to old schema: {e}")
+                try:
+                    cursor = conn.execute(
+                        "SELECT name, status, created_at, parameters FROM experiments WHERE experiment_id = ?",
+                        [experiment_id]
+                    )
+                    exp_result = cursor.fetchone()
+                    
+                    if exp_result is None:
+                        return None
+                    
+                    name, status, created_at, parameters_json = exp_result
+                    parameters_dict = json.loads(parameters_json)
+                    n_players = parameters_dict.get("n_players")
+                    max_steps = parameters_dict.get("max_steps")
+                    initial_resource = parameters_dict.get("initial_resource")
+                    regeneration_rate = parameters_dict.get("regeneration_rate")
+                    max_extraction = parameters_dict.get("max_extraction")
+                    Max_fish = parameters_dict.get("Max_fish") or parameters_dict.get("max_fishes", 1000)
+                    number_of_games = parameters_dict.get("number_of_games")
+                    number_of_players_per_game = parameters_dict.get("number_of_players_per_game")
+                except Exception as fallback_error:
+                    logger.error(f"Failed to load experiment with both new and old schema: {fallback_error}", exc_info=True)
+                    raise
             
             # Reconstruct parameters dict for backward compatibility
             parameters = {
@@ -993,21 +1009,26 @@ class DatabaseManager:
                     {"player_uuid": player_uuid, "persona": persona, "model": model}
                     for _, player_uuid, persona, model in player_results
                 ]
-            except Exception:
+            except Exception as e:
                 # Fallback to old schema (without UUIDs) - generate UUIDs on the fly
-                cursor = conn.execute(
-                    """SELECT player_index, persona, model 
-                       FROM experiment_players 
-                       WHERE experiment_id = ? 
-                       ORDER BY player_index""",
-                    [experiment_id]
-                )
-                player_results = cursor.fetchall()
-                
-                players = [
-                    {"player_uuid": str(uuid.uuid4()), "persona": persona, "model": model}
-                    for _, persona, model in player_results
-                ]
+                logger.debug(f"Failed to load players with new schema (player_uuid), falling back to old schema: {e}")
+                try:
+                    cursor = conn.execute(
+                        """SELECT player_index, persona, model 
+                           FROM experiment_players 
+                           WHERE experiment_id = ? 
+                           ORDER BY player_index""",
+                        [experiment_id]
+                    )
+                    player_results = cursor.fetchall()
+                    
+                    players = [
+                        {"player_uuid": str(uuid.uuid4()), "persona": persona, "model": model}
+                        for _, persona, model in player_results
+                    ]
+                except Exception as fallback_error:
+                    logger.error(f"Failed to load players with both new and old schema: {fallback_error}", exc_info=True)
+                    raise
             
             return {
                 "experiment_id": experiment_id,

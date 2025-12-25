@@ -41,8 +41,10 @@ exporters:
   otlphttp/langfuse:
     endpoint: https://cloud.langfuse.com/api/public/otel
     headers:
-      x-langfuse-public-key: pk-lf-3edc821f-ee5d-471e-a34c-6cb998ae0b91
-      x-langfuse-secret-key: sk-lf-dd59e2e9-c8fc-40d9-abd2-3cfa4f11eea9
+      # Langfuse OpenTelemetry endpoint requires Basic Auth (base64 encoded public_key:secret_key)
+      # The base64 encoded value is computed from ${LANGFUSE_PUBLIC_KEY}:${LANGFUSE_SECRET_KEY}
+      # This is set via environment variables in docker-compose.yml
+      Authorization: ${LANGFUSE_AUTH_HEADER}
     tls:
       insecure: false
 

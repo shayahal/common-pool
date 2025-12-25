@@ -3,7 +3,7 @@
 ## Virtual Environment
 
 - Always run the agent in the conda base environment
-- Activate the environment using: `/Users/shayyahal/miniconda3/bin/activate base`
+- Activate the environment using: `/Users/shayyahal/miniconda3/bin/activate base` or `.venv` directly under the root folder.
 - Ensure all Python commands and scripts are executed within this activated environment
 - Always find the most relevant virtual environment to use for the project
 
@@ -81,5 +81,66 @@ logger.warning("Database connection retry failed, will retry")
 # Error - use ERROR
 logger.error("Failed to initialize database", exc_info=True)
 logger.error(f"API call failed: {error}")
+```
+
+## Error Handling Rules
+
+### Never Implement Silent Errors or Warnings
+
+- **NEVER EVER** implement silent errors or warnings, unless the user explicitly asked to suppress this specific error
+- **NEVER** use `try-except` blocks without reraising the exception
+- **NEVER** simply print or log an error and then `pass` or continue silently
+- **ALWAYS** propagate errors unless you have a specific, intentional reason to handle them
+- If you catch an exception, you must either:
+  1. Reraise it (using `raise` or `raise ... from ...`)
+  2. Transform it into a more appropriate exception and raise that
+  3. Handle it completely and intentionally (only if the user explicitly requested this behavior)
+
+### Examples of FORBIDDEN Patterns
+
+```python
+# ❌ FORBIDDEN: Silent error suppression
+try:
+    risky_operation()
+except Exception:
+    pass  # NEVER DO THIS
+
+# ❌ FORBIDDEN: Log and ignore
+try:
+    risky_operation()
+except Exception as e:
+    logger.error(f"Error: {e}")  # Logging alone is not enough
+    pass  # NEVER DO THIS
+
+# ❌ FORBIDDEN: Catch and continue silently
+try:
+    risky_operation()
+except Exception:
+    logger.warning("Operation failed, continuing...")  # Silent warning
+    continue  # NEVER DO THIS without explicit user request
+```
+
+### Examples of CORRECT Patterns
+
+```python
+# ✅ CORRECT: Reraise the exception
+try:
+    risky_operation()
+except Exception:
+    raise  # Always reraise unless explicitly handling
+
+# ✅ CORRECT: Transform and reraise
+try:
+    risky_operation()
+except ValueError as e:
+    raise CustomError("Operation failed") from e
+
+# ✅ CORRECT: Handle completely (only if user explicitly requested)
+try:
+    optional_operation()
+except Exception as e:
+    logger.warning(f"Optional operation failed: {e}")
+    # Only acceptable if user explicitly asked to suppress this error
+    return default_value
 ```
 

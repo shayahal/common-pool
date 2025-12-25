@@ -90,11 +90,11 @@ class GracefulOTLPExporter(SpanExporter):
             self.exporter.shutdown()
         except Exception as e:
             # Log shutdown errors - never fail silently
-            # Don't re-raise during cleanup to avoid crashing the application
             logger.error(
                 f"Error shutting down OpenTelemetry exporter for {self.endpoint}: {e}",
                 exc_info=True
             )
+            raise
     
     def force_flush(self, timeout_millis: int = 30000):
         """Force flush the underlying exporter."""
@@ -106,8 +106,7 @@ class GracefulOTLPExporter(SpanExporter):
                 f"Error flushing OpenTelemetry exporter for {self.endpoint}: {e}",
                 exc_info=True
             )
-            # Return False to indicate failure, but error is logged
-            return False
+            raise
 
 
 class OTelManager:
@@ -411,15 +410,20 @@ class OTelManager:
             else:
                 # No real provider, set ours
                 trace.set_tracer_provider(self.tracer_provider)
-        except Exception:
+        except Exception as e:
             # If anything goes wrong, try to set our provider
-            # This might raise a warning, but it's better than failing
+            logger.warning(f"Error setting tracer provider, attempting fallback: {e}")
             try:
                 trace.set_tracer_provider(self.tracer_provider)
-            except Exception:
+            except Exception as fallback_error:
                 # If setting fails (e.g., provider already set), just reuse existing
-                self.tracer_provider = trace.get_tracer_provider()
-                self._provider_owned = False  # We didn't create it
+                logger.debug(f"Fallback tracer provider setting failed, reusing existing: {fallback_error}")
+                try:
+                    self.tracer_provider = trace.get_tracer_provider()
+                    self._provider_owned = False  # We didn't create it
+                except Exception as final_error:
+                    logger.error(f"Failed to get existing tracer provider: {final_error}", exc_info=True)
+                    raise
         
         # Get tracer
         self.tracer = trace.get_tracer(service_name)

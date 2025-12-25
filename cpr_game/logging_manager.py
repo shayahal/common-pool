@@ -453,8 +453,8 @@ class LoggingManager:
                 self.otel_manager.flush()
             except Exception as e:
                 # In __del__, we can't raise exceptions, but we log the error
-                # Use warning instead of error since this is cleanup
-                logger.debug(f"Error flushing traces during cleanup: {e}")
+                # Use ERROR level to ensure it's visible
+                logger.error(f"Error flushing traces during cleanup: {e}", exc_info=True)
 
 
 class MockLoggingManager(LoggingManager):

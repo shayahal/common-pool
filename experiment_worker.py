@@ -122,7 +122,8 @@ def get_pending_experiments(db_manager: DatabaseManager, reset_stale_running: bo
                     if reset_count > 0:
                         logger.info(f"Reset {reset_count} stale 'running' experiments back to 'pending' status")
             except Exception as e:
-                logger.warning(f"Failed to reset stale running experiments: {e}")
+                logger.error(f"Failed to reset stale running experiments: {e}", exc_info=True)
+                raise
         
         # Get pending experiments
         cursor = conn.execute(
@@ -133,7 +134,7 @@ def get_pending_experiments(db_manager: DatabaseManager, reset_stale_running: bo
         return [row[0] for row in results]
     except Exception as e:
         logger.error(f"Failed to query pending experiments: {e}", exc_info=True)
-        return []
+        raise
 
 
 def claim_experiment(db_manager: DatabaseManager, experiment_id: str) -> bool:
@@ -176,7 +177,7 @@ def claim_experiment(db_manager: DatabaseManager, experiment_id: str) -> bool:
             return False
     except Exception as e:
         logger.error(f"Failed to claim experiment {experiment_id}: {e}", exc_info=True)
-        return False
+        raise
 
 
 def process_experiment(
@@ -252,9 +253,12 @@ def process_experiment(
             db_manager.update_experiment_status(experiment_id, "failed")
             db_manager.close()
         except Exception as update_error:
-            logger.error(f"{worker_prefix} Failed to update experiment {experiment_id} status to 'failed': {update_error}")
+            logger.error(f"{worker_prefix} Failed to update experiment {experiment_id} status to 'failed': {update_error}", exc_info=True)
+            # Reraise the update error - this is a secondary failure
+            raise
         
-        return False
+        # Reraise the original error
+        raise
 
 
 def worker_loop(
@@ -332,18 +336,16 @@ def worker_loop(
                             db_manager.update_experiment_status(experiment_id, "pending")
                             db_manager.close()
                         except Exception as reset_error:
-                            logger.warning(f"[Worker {worker_id}] Failed to reset experiment {experiment_id} to pending: {reset_error}")
+                            logger.error(f"[Worker {worker_id}] Failed to reset experiment {experiment_id} to pending: {reset_error}", exc_info=True)
+                            raise
                         break
                     # Process the experiment (already claimed, so pass already_claimed=True)
-                    try:
-                        process_experiment(
-                            experiment_id=experiment_id,
-                            worker_id=worker_id,
-                            max_workers=game_workers,
-                            already_claimed=True
-                        )
-                    except Exception as e:
-                        logger.error(f"[Worker {worker_id}] Exception during experiment processing: {e}", exc_info=True)
+                    process_experiment(
+                        experiment_id=experiment_id,
+                        worker_id=worker_id,
+                        max_workers=game_workers,
+                        already_claimed=True
+                    )
                     break  # Process one experiment per iteration
                 else:
                     db_manager.close()
@@ -357,7 +359,7 @@ def worker_loop(
                 
         except Exception as e:
             logger.error(f"[Worker {worker_id}] Error in worker loop: {e}", exc_info=True)
-            interruptible_sleep(poll_interval)
+            raise
     
     logger.info(f"[Worker {worker_id}] Worker loop ended")
 
