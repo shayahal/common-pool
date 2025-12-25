@@ -50,10 +50,11 @@ Distributed tracing for research, observability, and API metrics tracking. All t
 - **API metrics** (tokens, costs, latency) are captured as OpenTelemetry span attributes
 
 ### Features
-- Hierarchical tracing: Game → Round → Player Action → LLM Generation
-- API metrics tracking (tokens, costs, latency) automatically captured via spans
+- **Thread-based tracing** (LangSmith model): Each game is a thread, each player action is a separate trace
+- API metrics tracking (tokens, costs, latency) automatically captured via span attributes
 - Distributed tracing across game execution
 - Research analysis and debugging
+- View all player actions in a game as a conversation thread in LangSmith
 
 ### Configuration
 

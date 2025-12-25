@@ -33,14 +33,18 @@ class LoggingManager:
     Uses OpenTelemetry as single source of truth. Traces are exported
     via OTLP to configured receivers (Langfuse, LangSmith, etc.).
 
-    Tracing structure:
-        Trace: game_{game_id}
-        ├── Span: game_setup
-        ├── Span: round_{round_num}
-        │   ├── Span: player_{player_id}_action
-        │   │   └── Span: llm_generation (auto-instrumented)
-        │   └── Span: round_metrics
-        └── Span: game_summary
+    Tracing structure (Thread model - works for both Langfuse and LangSmith):
+        Thread: game_{game_id} (via session_id metadata)
+        ├── Trace: player_{player_id}_action_round_{round_num}
+        │   ├── Span: llm_generation (auto-instrumented)
+        │   └── Span: action_processing
+        ├── Trace: player_{player_id}_action_round_{round_num}
+        │   └── ...
+        └── ...
+    
+    Each player action is a separate trace, grouped into a thread using
+    session_id metadata. This allows viewing all player actions in a game
+    as a conversation thread in both Langfuse and LangSmith.
     """
 
     def __init__(self, config: Optional[Dict] = None):
@@ -69,11 +73,10 @@ class LoggingManager:
                 logger.error(f"Failed to initialize OpenTelemetry: {e}", exc_info=True)
                 raise RuntimeError(f"Failed to initialize OpenTelemetry: {e}") from e
 
-        # Game tracking
+        # Game tracking (thread identifier)
         self.game_id = None
         self.current_round = 0
-        self.current_trace = None
-        self.current_round_span = None
+        # No root trace - each player action will be its own trace
 
         # Metrics accumulation (for dashboard/analysis only)
         self.round_metrics: List[Dict] = []
@@ -81,87 +84,32 @@ class LoggingManager:
         self.api_metrics_data: List[Dict] = []
 
     def start_game_trace(self, game_id: str, config: Dict) -> None:
-        """Initialize game tracking and create trace.
+        """Initialize game tracking (thread).
 
         Args:
-            game_id: Unique identifier for this game
+            game_id: Unique identifier for this game (used as thread/session_id)
             config: Game configuration
         """
         self.game_id = game_id
         self.current_round = 0
 
         if self.tracer is None:
-            logger.debug(f"OTel disabled - skipping trace creation for game_id: {game_id}")
+            logger.debug(f"OTel disabled - skipping thread initialization for game_id: {game_id}")
             return
 
-        try:
-            # Start root trace for the game
-            self.current_trace = self.tracer.start_as_current_span(
-                f"game_{game_id}",
-                attributes={
-                    "game.id": game_id,
-                    "game.n_players": config.get("n_players", 2),
-                    "game.max_steps": config.get("max_steps", 20),
-                    "game.initial_resource": config.get("initial_resource", 1000),
-                }
-            )
-            # Enter the context manager to activate the span
-            self.current_trace.__enter__()
-            
-            # Create game_setup span
-            with self.tracer.start_as_current_span(
-                "game_setup",
-                attributes={
-                    "game.id": game_id,
-                    "game.config": str(config),
-                }
-            ) as setup_span:
-                setup_span.add_event("game.started")
-            
-            logger.info(f"Starting game tracking for game_id: {game_id}")
-        except Exception as e:
-            error_msg = f"Error starting game trace: {e}"
-            logger.error(error_msg, exc_info=True)
-            raise RuntimeError(error_msg) from e
+        # No root trace needed - each player action will be its own trace
+        # The game_id will be used as session_id to group traces into a thread
+        # This works for both Langfuse and LangSmith
+        logger.info(f"Starting game thread for game_id: {game_id} (n_players={config.get('n_players', 2)})")
 
     def set_current_round(self, round_num: int):
-        """Set the current round number and create round span.
+        """Set the current round number.
 
         Args:
             round_num: Round number
         """
         self.current_round = round_num
-
-        if self.tracer is None:
-            return
-
-        try:
-            # End previous round span if exists
-            # The context manager automatically ends when exited, but we need to exit it properly
-            if self.current_round_span is not None:
-                try:
-                    # Exit the previous context manager
-                    self.current_round_span.__exit__(None, None, None)
-                except Exception as e:
-                    error_msg = f"Error exiting previous round span: {e}"
-                    logger.error(error_msg, exc_info=True)
-                    raise RuntimeError(error_msg) from e
-                self.current_round_span = None
-
-            # Start new round span (returns a context manager)
-            self.current_round_span = self.tracer.start_as_current_span(
-                f"round_{round_num}",
-                attributes={
-                    "round.number": round_num,
-                    "game.id": self.game_id,
-                }
-            )
-            # Enter the context manager to activate the span
-            self.current_round_span.__enter__()
-        except Exception as e:
-            error_msg = f"Error creating round span: {e}"
-            logger.error(error_msg, exc_info=True)
-            raise RuntimeError(error_msg) from e
+        # No round span needed - round info will be in trace attributes
 
     def log_generation(
         self,
@@ -174,7 +122,11 @@ class LoggingManager:
         api_metrics: Optional[Dict] = None,
         system_prompt: Optional[str] = None
     ):
-        """Log an LLM generation as a span.
+        """Log an LLM generation as a separate trace (threaded by game).
+
+        Each player action becomes its own trace, grouped into a thread
+        using session_id metadata (game_id). This follows LangSmith's
+        thread model for multi-turn conversations.
 
         Args:
             player_id: Player identifier
@@ -192,9 +144,10 @@ class LoggingManager:
             return
 
         try:
-            span_name = f"player_{player_id}_action"
+            # Each player action is its own trace (root span)
+            trace_name = f"player_{player_id}_action_round_{self.current_round}"
             
-            # Create span attributes
+            # Create trace attributes
             attributes = {
                 "player.id": player_id,
                 "action.extraction": float(action),
@@ -241,32 +194,42 @@ class LoggingManager:
             if self.config.get("log_llm_responses", True) and response:
                 attributes["output"] = response
 
-            # Create player action span
+            # CRITICAL: Add session_id to attributes for thread grouping
+            # Both Langfuse and LangSmith use session_id, thread_id, or conversation_id
+            # in span attributes to group traces into threads
+            attributes["session_id"] = self.game_id
+            
+            # Create a new trace (root span) for this player action
+            # Each trace is independent but grouped by session_id into a thread
+            # This works for both Langfuse and LangSmith
+            # start_as_current_span creates a root span if no parent context exists
             with self.tracer.start_as_current_span(
-                span_name,
+                trace_name,
                 attributes=attributes
-            ) as player_span:
+            ) as root_span:
                 # Add events for prompt/response (for backward compatibility and detailed logging)
                 if self.config.get("log_llm_prompts", True):
                     if system_prompt:
-                        player_span.add_event("prompt.system", {"content": system_prompt[:1000]})
-                    player_span.add_event("prompt.user", {"content": prompt[:1000]})
+                        root_span.add_event("prompt.system", {"content": system_prompt[:1000]})
+                    root_span.add_event("prompt.user", {"content": prompt[:1000]})
                 
                 if self.config.get("log_llm_responses", True):
-                    player_span.add_event("response.received", {"content": response[:1000]})
+                    root_span.add_event("response.received", {"content": response[:1000]})
                 
-                player_span.add_event("action.extracted", {"action": float(action)})
+                root_span.add_event("action.extracted", {"action": float(action)})
+                
+                # LLM generation spans will be auto-instrumented as child spans
 
             # Debug log for API calls
             if api_metrics:
                 logger.debug(
-                    f"✅ Logged trace via OTel: {self.game_id}_round_{self.current_round}_player_{player_id} | "
+                    f"✅ Logged trace (thread: {self.game_id}): {trace_name} | "
                     f"Tokens: {api_metrics.get('total_tokens', 'N/A')} | "
                     f"Latency: {api_metrics.get('latency', 0):.2f}s | "
                     f"Cost: ${api_metrics.get('cost', 0):.4f}"
                 )
             else:
-                logger.debug(f"Logged trace via OTel: {self.game_id}_round_{self.current_round}_player_{player_id}")
+                logger.debug(f"Logged trace (thread: {self.game_id}): {trace_name}")
 
             # Store for later analysis (dashboard/metrics)
             self._store_generation_data(player_id, prompt, response, action, reasoning, api_metrics)
@@ -321,10 +284,11 @@ class LoggingManager:
             return
 
         try:
-            # Create round_metrics span
+            # Create round_metrics trace (part of the same thread)
             with self.tracer.start_as_current_span(
-                "round_metrics",
+                f"round_{round_num}_metrics",
                 attributes={
+                    "session_id": self.game_id,  # Part of the game thread
                     "round.number": round_num,
                     "game.id": self.game_id,
                     "resource.level": float(metrics.get("resource_level", 0)),
@@ -351,37 +315,22 @@ class LoggingManager:
             raise RuntimeError(error_msg) from e
 
     def end_game_trace(self, summary: Dict):
-        """Finalize game and flush traces.
+        """Finalize game thread and flush traces.
 
         Args:
             summary: Game summary statistics
         """
         if self.tracer is None:
-            logger.debug("OTel disabled - skipping trace finalization")
+            logger.debug("OTel disabled - skipping thread finalization")
             return
 
         try:
-            # End current round span if exists
-            if self.current_round_span is not None:
-                try:
-                    # Exit the context manager properly
-                    self.current_round_span.__exit__(None, None, None)
-                except RuntimeError as e:
-                    # "generator didn't stop" means the context wasn't properly entered
-                    if "generator didn't stop" in str(e):
-                        logger.warning(f"Round span context already closed or not properly entered")
-                    else:
-                        raise
-                except Exception as e:
-                    error_msg = f"Error exiting current round span: {e}"
-                    logger.warning(error_msg)
-                finally:
-                    self.current_round_span = None
-
-            # Create game_summary span
+            # Optionally create a summary trace for the game completion
+            # This will also be part of the same thread (same session_id)
             with self.tracer.start_as_current_span(
                 "game_summary",
                 attributes={
+                    "session_id": self.game_id,  # Keep in same thread
                     "game.id": self.game_id,
                     "game.total_rounds": int(summary.get("total_rounds", 0)),
                     "game.final_resource": float(summary.get("final_resource_level", 0)),
@@ -392,40 +341,16 @@ class LoggingManager:
             ) as summary_span:
                 summary_span.add_event("game.completed")
 
-            # End root trace
-            if self.current_trace is not None:
-                try:
-                    # Exit the context manager properly
-                    # Check if it's already exited by trying to get the span
-                    try:
-                        self.current_trace.__exit__(None, None, None)
-                    except RuntimeError as e:
-                        # "generator didn't stop" means the context wasn't properly entered
-                        # This can happen if the span was never entered or already exited
-                        if "generator didn't stop" in str(e):
-                            logger.warning(f"Trace context already closed or not properly entered for game {self.game_id}")
-                        else:
-                            raise
-                except Exception as e:
-                    error_msg = f"Error exiting root trace: {e}"
-                    # Don't raise for context manager errors - just log and continue
-                    logger.warning(error_msg)
-                finally:
-                    self.current_trace = None
-
-            # Flush all pending spans
-            logger.info("Flushing OTel traces...")
+            # Flush all pending traces
+            logger.info(f"Flushing OTel traces for thread: {self.game_id}...")
             self.otel_manager.flush()
-            logger.info("✓ Successfully flushed all traces via OTel")
+            logger.info(f"✓ Successfully flushed all traces for thread: {self.game_id}")
 
         except Exception as e:
-            error_msg = f"Error ending game trace: {e}"
+            error_msg = f"Error ending game thread: {e}"
             # Don't raise - just log warning and continue
             # This allows games to complete even if tracing has issues
             logger.warning(error_msg)
-            # Clean up trace references
-            self.current_trace = None
-            self.current_round_span = None
 
     def get_round_metrics(self) -> List[Dict]:
         """Get all collected round metrics.
@@ -455,8 +380,6 @@ class LoggingManager:
         """Reset manager state for new game."""
         self.game_id = None
         self.current_round = 0
-        self.current_trace = None
-        self.current_round_span = None
         self.round_metrics = []
         self.generation_data = []
         self.api_metrics_data = []
@@ -493,8 +416,6 @@ class MockLoggingManager(LoggingManager):
         self.api_metrics_data = []
         self.game_id = None
         self.current_round = 0
-        self.current_trace = None
-        self.current_round_span = None
 
     def start_game_trace(self, game_id: str, config: Dict) -> None:
         """Start mock game tracking."""
