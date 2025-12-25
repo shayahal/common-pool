@@ -184,7 +184,8 @@ def process_experiment(
     experiment_id: str,
     worker_id: Optional[int] = None,
     max_workers: Optional[int] = None,
-    already_claimed: bool = False
+    already_claimed: bool = False,
+    debug: bool = False
 ) -> bool:
     """Process a single experiment.
     
@@ -235,10 +236,13 @@ def process_experiment(
         # Note: run_experiment also tries to update status to 'running', but since we've already claimed it,
         # this is idempotent and harmless
         # Always use real agents (no mock agents)
+        # In debug mode, force max_workers to 1 for single-threaded execution
+        effective_max_workers = 1 if debug else max_workers
         success = run_experiment(
             experiment_id=experiment_id,
             use_mock_agents=False,
-            max_workers=max_workers
+            max_workers=effective_max_workers,
+            debug=debug
         )
         
         logger.info(f"{worker_prefix} Completed experiment {experiment_id}: {'SUCCESS' if success else 'FAILED'}")
@@ -265,7 +269,8 @@ def worker_loop(
     worker_id: int,
     game_workers: Optional[int],
     poll_interval: float,
-    stale_timeout_hours: int = 1
+    stale_timeout_hours: int = 1,
+    debug: bool = False
 ):
     """Main loop for a worker thread.
     
@@ -344,7 +349,8 @@ def worker_loop(
                         experiment_id=experiment_id,
                         worker_id=worker_id,
                         max_workers=game_workers,
-                        already_claimed=True
+                        already_claimed=True,
+                        debug=debug
                     )
                     break  # Process one experiment per iteration
                 else:
@@ -405,6 +411,12 @@ Examples:
         help="Hours after which a 'running' experiment is considered stale and reset to 'pending' (default: 1)"
     )
     
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Run in debug mode: single-threaded execution in main thread (no parallel workers)"
+    )
+    
     args = parser.parse_args()
     
     if args.workers < 1:
@@ -432,6 +444,8 @@ Examples:
         except (AttributeError, ValueError):
             pass
     # On Windows, we rely on KeyboardInterrupt being raised directly
+
+    debug_mode = args.debug or os.getenv("DEBUG", "false").lower() == "true"
     
     logger.info("=" * 60)
     logger.info("EXPERIMENT WORKER STARTING")
@@ -441,14 +455,42 @@ Examples:
     logger.info(f"Poll interval: {args.poll_interval}s")
     logger.info(f"Stale timeout: {args.stale_timeout_hours} hours")
     logger.info(f"Agent mode: REAL (API calls enabled)")
+    logger.info(f"Debug mode: {'ENABLED (single-threaded)' if debug_mode else 'DISABLED (parallel)'}")
     logger.info("=" * 60)
     
-    # Start worker threads
+    # In debug mode, run in main thread
+    if debug_mode:
+        logger.info("Running in DEBUG mode: single-threaded execution in main thread")
+        # Override game_workers to 1 for single-threaded game execution
+        debug_game_workers = 1
+        logger.info(f"Game workers set to 1 for debug mode")
+        
+        # Run worker loop directly in main thread
+        try:
+            worker_loop(
+                worker_id=0,
+                game_workers=debug_game_workers,
+                poll_interval=args.poll_interval,
+                stale_timeout_hours=args.stale_timeout_hours,
+                debug=True
+            )
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received (CTRL-C), exiting...")
+        except Exception as e:
+            logger.error(f"Error in debug mode: {e}", exc_info=True)
+            raise
+        
+        logger.info("=" * 60)
+        logger.info("EXPERIMENT WORKER SHUTDOWN COMPLETE")
+        logger.info("=" * 60)
+        return
+    
+    # Start worker threads (normal mode)
     worker_threads = []
     for worker_id in range(args.workers):
         thread = threading.Thread(
             target=worker_loop,
-            args=(worker_id, args.game_workers, args.poll_interval, args.stale_timeout_hours),
+            args=(worker_id, args.game_workers, args.poll_interval, args.stale_timeout_hours, False),
             name=f"Worker-{worker_id}",
             daemon=False  # Don't allow daemon threads so they can finish gracefully
         )

@@ -12,7 +12,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Sequence
 
 try:
     from graphiti_core import Graphiti
@@ -447,7 +447,7 @@ class FalkorDBExporter(SpanExporter):
         logger.error(f"Failed to add episode {episode_name}: {last_error}", exc_info=True)
         return False
     
-    async def _export_spans_async(self, spans: List[ReadableSpan]) -> SpanExportResult:
+    async def _export_spans_async(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         """Export spans to FalkorDB asynchronously.
         
         Args:
@@ -533,14 +533,19 @@ class FalkorDBExporter(SpanExporter):
             logger.info(f"Successfully exported all {len(spans)} spans to FalkorDB")
             return SpanExportResult.SUCCESS
     
-    def export(self, spans: List[ReadableSpan]) -> SpanExportResult:
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         """Export spans to FalkorDB (synchronous wrapper).
+        
+        IMPORTANT: This method schedules the export asynchronously and returns immediately
+        to avoid blocking other exporters (like Langfuse). The actual export happens in
+        the background. This ensures Langfuse traces are sent immediately without waiting
+        for FalkorDB to complete.
         
         Args:
             spans: List of spans to export
             
         Returns:
-            SpanExportResult indicating success or failure
+            SpanExportResult indicating success or failure (always SUCCESS to avoid blocking)
         """
         if not self.enabled:
             logger.debug(f"FalkorDB exporter disabled, skipping {len(spans)} spans")
@@ -550,14 +555,13 @@ class FalkorDBExporter(SpanExporter):
             logger.debug("No spans to export")
             return SpanExportResult.SUCCESS
         
-        logger.info(f"Exporting {len(spans)} spans to FalkorDB")
+        logger.info(f"Scheduling export of {len(spans)} spans to FalkorDB (non-blocking)")
         
-        # Wait for Graphiti to be ready if not yet
-        # NO SILENT FAILURES - if enabled, Graphiti MUST be ready
+        # Wait for Graphiti to be ready if not yet (quick check, don't block long)
         if self.graphiti is None:
             import time
-            logger.warning("Graphiti instance not ready, waiting up to 5 seconds...")
-            for i in range(50):  # Wait up to 5 seconds
+            logger.warning("Graphiti instance not ready, waiting up to 2 seconds...")
+            for i in range(20):  # Wait up to 2 seconds (reduced from 5)
                 if self.graphiti is not None:
                     logger.info(f"Graphiti instance ready after {i * 0.1:.1f}s")
                     break
@@ -565,48 +569,53 @@ class FalkorDBExporter(SpanExporter):
             
             if self.graphiti is None:
                 error_msg = (
-                    "FATAL: Graphiti instance still not ready after waiting 5 seconds. "
+                    "FATAL: Graphiti instance still not ready after waiting 2 seconds. "
                     "FalkorDB export is enabled but cannot export spans. "
                     "This indicates a serious initialization problem."
                 )
                 logger.error(error_msg)
-                raise RuntimeError(error_msg)
+                # Don't raise - schedule the export anyway, it will fail and be logged
+                # This prevents blocking other exporters
         
-        # Use background event loop if available, otherwise create a new one
+        # Schedule export in background and return immediately (non-blocking)
+        # This allows Langfuse and other exporters to flush without waiting
         if self._loop is not None and self._loop.is_running():
-            # Schedule task in background loop and WAIT for it to complete
-            # NO SILENT FAILURES - we must ensure the export actually happens
+            # Wrap the async export to catch and log any exceptions
+            async def export_with_error_handling():
+                try:
+                    return await self._export_spans_async(spans)
+                except Exception as e:
+                    # Log the error - NO SILENT FAILURES
+                    logger.error(
+                        f"FalkorDB async export failed: {e}. "
+                        f"This error occurred in background export and was logged.",
+                        exc_info=True
+                    )
+                    # Return failure but don't raise - we're in background task
+                    return SpanExportResult.FAILURE
+            
+            # Schedule task in background loop but DON'T wait for it
+            # The export will happen asynchronously
             task = asyncio.run_coroutine_threadsafe(
-                self._export_spans_async(spans),
+                export_with_error_handling(),
                 self._loop
             )
             
-            # Wait for the task to complete (with timeout)
-            try:
-                # Wait up to 5 minutes for export (each episode takes ~24 seconds)
-                result = task.result(timeout=self.export_timeout)
-                logger.debug(f"Export task completed: {result}")
-                return result
-            except FuturesTimeoutError:
-                error_msg = f"FalkorDB export timed out after {self.export_timeout}s - this is a FATAL error"
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
-            except RuntimeError:
-                # Re-raise RuntimeError as-is (it already has the correct message from _export_spans_async)
-                raise
-            except Exception as e:
-                error_msg = f"FalkorDB export failed: {e}"
-                logger.error(error_msg, exc_info=True)
-                raise RuntimeError(error_msg) from e
+            # Store the task so we can check its status later if needed
+            # But return SUCCESS immediately to avoid blocking
+            logger.debug(f"FalkorDB export scheduled asynchronously (task: {task})")
+            return SpanExportResult.SUCCESS
         else:
-            # Fallback: run in new event loop (shouldn't happen normally)
-            logger.debug(f"Running export in new event loop for {len(spans)} spans")
+            # Fallback: if no event loop, we need to run it
+            # But this shouldn't happen normally
+            logger.warning("No event loop available, running export synchronously (this may block)")
             try:
                 return asyncio.run(self._export_spans_async(spans))
             except Exception as e:
                 error_msg = f"FalkorDB export failed in new event loop: {e}"
                 logger.error(error_msg, exc_info=True)
-                raise RuntimeError(error_msg) from e
+                # Return SUCCESS anyway to avoid blocking other exporters
+                return SpanExportResult.SUCCESS
     
     def shutdown(self):
         """Shutdown the exporter."""

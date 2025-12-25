@@ -31,7 +31,8 @@ def run_single_game(
     game_index: int,
     selected_players: List[Dict[str, str]],
     parameters: Dict,
-    use_mock_agents: bool = False
+    use_mock_agents: bool = False,
+    debug: bool = False
 ) -> Optional[Dict]:
     """Run a single game with selected players.
     
@@ -93,7 +94,7 @@ def run_single_game(
         
         # Create game runner
         logger.debug(f"[Game {game_index:04d}] Creating GameRunner...")
-        runner = GameRunner(config=config, use_mock_agents=use_mock_agents)
+        runner = GameRunner(config=config, use_mock_agents=use_mock_agents, debug=debug)
         
         # Setup game
         logger.debug(f"[Game {game_index:04d}] Setting up game environment...")
@@ -125,14 +126,16 @@ def run_single_game(
 def run_experiment(
     experiment_id: str,
     use_mock_agents: bool = False,
-    max_workers: Optional[int] = None
+    max_workers: Optional[int] = None,
+    debug: bool = False
 ) -> bool:
-    """Run an experiment by executing all games in parallel.
+    """Run an experiment by executing all games in parallel or sequentially.
     
     Args:
         experiment_id: Experiment identifier
         use_mock_agents: Whether to use mock agents (no API calls)
         max_workers: Maximum number of parallel workers (default: min(10, number_of_games))
+        debug: If True, run games sequentially in single thread (default: False)
         
     Returns:
         True if experiment completed successfully, False otherwise
@@ -222,9 +225,12 @@ def run_experiment(
             number_of_players_per_game = len(players)
         
         # Set max workers
-        if max_workers is None:
+        if debug:
+            max_workers = 1
+            logger.info("DEBUG mode: Running games sequentially in single thread")
+        elif max_workers is None:
             max_workers = min(10, number_of_games)
-        logger.info(f"Parallel execution: {max_workers} workers")
+        logger.info(f"Execution mode: {'Sequential (debug)' if debug else f'Parallel ({max_workers} workers)'}")
         logger.info(f"Agent mode: {'MOCK (no API calls)' if use_mock_agents else 'REAL (API calls enabled)'}")
         
         # Prepare game configurations
@@ -239,32 +245,25 @@ def run_experiment(
             
             game_configs.append((i, selected_players))
         
-        logger.info(f"Game configurations prepared. Starting parallel execution...")
+        logger.info(f"Game configurations prepared. Starting {'sequential' if debug else 'parallel'} execution...")
         logger.info("=" * 60)
         
         successful_games = 0
         failed_games = 0
         
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all games
-            future_to_game = {
-                executor.submit(
-                    run_single_game,
-                    experiment_id,
-                    game_index,
-                    selected_players,
-                    parameters,
-                    use_mock_agents
-                ): game_index
-                for game_index, selected_players in game_configs
-            }
-            
-            # Process results with progress bar
+        if debug:
+            # Sequential execution in debug mode
             with tqdm(total=number_of_games, desc="Running games", unit="game") as pbar:
-                for future in as_completed(future_to_game):
-                    game_index = future_to_game[future]
+                for game_index, selected_players in game_configs:
                     try:
-                        result = future.result()
+                        result = run_single_game(
+                            experiment_id,
+                            game_index,
+                            selected_players,
+                            parameters,
+                            use_mock_agents,
+                            debug
+                        )
                         
                         if result:
                             # Save result to database
@@ -302,6 +301,66 @@ def run_experiment(
                         })
                     
                     pbar.update(1)
+        else:
+            # Parallel execution (normal mode)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all games
+                future_to_game = {
+                    executor.submit(
+                        run_single_game,
+                        experiment_id,
+                        game_index,
+                        selected_players,
+                        parameters,
+                        use_mock_agents,
+                        debug
+                    ): game_index
+                    for game_index, selected_players in game_configs
+                }
+                
+                # Process results with progress bar
+                with tqdm(total=number_of_games, desc="Running games", unit="game") as pbar:
+                    for future in as_completed(future_to_game):
+                        game_index = future_to_game[future]
+                        try:
+                            result = future.result()
+                            
+                            if result:
+                                # Save result to database
+                                logger.debug(f"[Game {game_index:04d}] Saving results to database...")
+                                save_success = db_manager.save_experiment_result(
+                                    experiment_id=experiment_id,
+                                    game_id=result["game_id"],
+                                    summary=result["summary"],
+                                    selected_players=result.get("selected_players", [])
+                                )
+                                if save_success:
+                                    successful_games += 1
+                                    logger.info(f"[Game {game_index:04d}] [OK] Successfully completed and saved")
+                                else:
+                                    failed_games += 1
+                                    logger.error(f"[Game {game_index:04d}] [FAIL] Game completed but failed to save to database")
+                                pbar.set_postfix({
+                                    "success": successful_games,
+                                    "failed": failed_games
+                                })
+                            else:
+                                failed_games += 1
+                                logger.warning(f"[Game {game_index:04d}] [FAIL] Game failed (returned None)")
+                                pbar.set_postfix({
+                                    "success": successful_games,
+                                    "failed": failed_games
+                                })
+                            
+                        except Exception as e:
+                            failed_games += 1
+                            logger.error(f"[Game {game_index:04d}] [FAIL] Error processing game: {e}", exc_info=True)
+                            pbar.set_postfix({
+                                "success": successful_games,
+                                "failed": failed_games
+                            })
+                        
+                        pbar.update(1)
         
         # Update experiment status
         logger.info("=" * 60)

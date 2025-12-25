@@ -32,13 +32,15 @@ class GameRunner:
     def __init__(
         self,
         config: Optional[Dict] = None,
-        use_mock_agents: bool = False
+        use_mock_agents: bool = False,
+        debug: bool = False
     ):
         """Initialize game runner.
 
         Args:
             config: Configuration dictionary
             use_mock_agents: Use MockLLMAgent instead of real LLM calls
+            debug: If True, run agents sequentially in single thread (default: False)
         """
         self.config = config if config is not None else CONFIG.copy()
 
@@ -47,6 +49,7 @@ class GameRunner:
 
         # Flags
         self.use_mock_agents = use_mock_agents
+        self.debug = debug
 
         # Components (initialized in setup)
         self.env: Optional[CPREnvironment] = None
@@ -236,23 +239,18 @@ class GameRunner:
                         logger.error(error_msg, exc_info=True)
                     raise RuntimeError(error_msg) from e
             
-            # Run all agents in parallel using ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=self.config['n_players']) as executor:
-                # Submit all agent actions
-                future_to_player = {
-                    executor.submit(run_agent_action, i, agent, observations[f"player_{i}"]): i
-                    for i, agent in enumerate(self.agents)
-                }
-                
-                # Collect results as they complete (maintain order by player_id)
+            # Run all agents in parallel using ThreadPoolExecutor (or sequentially in debug mode)
+            if self.debug:
+                # Sequential execution in debug mode
                 results = {}
-                for future in as_completed(future_to_player):
+                for i, agent in enumerate(self.agents):
                     try:
-                        player_id, action, reasoning, api_metrics, prompt, system_prompt = future.result()
+                        player_id, action, reasoning, api_metrics, prompt, system_prompt = run_agent_action(
+                            i, agent, observations[f"player_{i}"]
+                        )
                         results[player_id] = (action, reasoning, api_metrics, prompt, system_prompt)
                     except Exception as e:
-                        player_id = future_to_player[future]
-                        error_msg = f"Error getting result from agent {player_id}: {e}"
+                        error_msg = f"Error in agent {i}: {e}"
                         # Don't print stack trace for rate limit errors
                         error_str = str(e).lower()
                         if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
@@ -260,6 +258,31 @@ class GameRunner:
                         else:
                             logger.error(error_msg, exc_info=True)
                         raise RuntimeError(error_msg) from e
+            else:
+                # Parallel execution (normal mode)
+                with ThreadPoolExecutor(max_workers=self.config['n_players']) as executor:
+                    # Submit all agent actions
+                    future_to_player = {
+                        executor.submit(run_agent_action, i, agent, observations[f"player_{i}"]): i
+                        for i, agent in enumerate(self.agents)
+                    }
+                    
+                    # Collect results as they complete (maintain order by player_id)
+                    results = {}
+                    for future in as_completed(future_to_player):
+                        try:
+                            player_id, action, reasoning, api_metrics, prompt, system_prompt = future.result()
+                            results[player_id] = (action, reasoning, api_metrics, prompt, system_prompt)
+                        except Exception as e:
+                            player_id = future_to_player[future]
+                            error_msg = f"Error getting result from agent {player_id}: {e}"
+                            # Don't print stack trace for rate limit errors
+                            error_str = str(e).lower()
+                            if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+                                logger.warning(error_msg)
+                            else:
+                                logger.error(error_msg, exc_info=True)
+                            raise RuntimeError(error_msg) from e
             
             # Process results in order
             for i in range(self.config['n_players']):

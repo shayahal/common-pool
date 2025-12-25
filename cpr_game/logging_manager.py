@@ -226,12 +226,27 @@ class LoggingManager:
                 if api_metrics.get("cost") is not None:
                     attributes["llm.cost"] = float(api_metrics["cost"])
 
+            # Add input/output as attributes for Langfuse compatibility
+            # Langfuse expects 'input' and 'output' attributes to display them in the UI
+            if self.config.get("log_llm_prompts", True):
+                # Build input from system prompt and user prompt
+                input_parts = []
+                if system_prompt:
+                    input_parts.append(f"System: {system_prompt}")
+                if prompt:
+                    input_parts.append(f"User: {prompt}")
+                if input_parts:
+                    attributes["input"] = "\n\n".join(input_parts)
+            
+            if self.config.get("log_llm_responses", True) and response:
+                attributes["output"] = response
+
             # Create player action span
             with self.tracer.start_as_current_span(
                 span_name,
                 attributes=attributes
             ) as player_span:
-                # Add events for prompt/response
+                # Add events for prompt/response (for backward compatibility and detailed logging)
                 if self.config.get("log_llm_prompts", True):
                     if system_prompt:
                         player_span.add_event("prompt.system", {"content": system_prompt[:1000]})
