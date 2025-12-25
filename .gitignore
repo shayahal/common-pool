@@ -55,6 +55,7 @@ logs/
 experiments/results_*.json
 experiments/*.png
 example_results.json
+data/
 
 # OS
 .DS_Store

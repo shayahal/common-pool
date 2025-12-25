@@ -5,4 +5,81 @@
 - Always run the agent in the conda base environment
 - Activate the environment using: `/Users/shayyahal/miniconda3/bin/activate base`
 - Ensure all Python commands and scripts are executed within this activated environment
+- Always find the most relevant virtual environment to use for the project
+
+## Logging Guidelines
+
+### Always Use Logs, Never Print
+- **NEVER** use `print()` statements in production code
+- **ALWAYS** use the logger from `cpr_game.logger_setup import get_logger`
+- Replace all `print()` calls with appropriate logger calls
+
+### Log Level Usage
+
+1. **DEBUG** - Use for:
+   - Flow steps and detailed execution traces
+   - API calls and their details (tokens, latency, cost)
+   - Internal state changes and intermediate operations
+   - Detailed diagnostic information
+
+2. **INFO** - Use for:
+   - Main events only (game start/end, experiment start/end, major milestones)
+   - High-level progress updates
+   - Important state changes that users should know about
+
+3. **WARNING** - Use for:
+   - Unexpected or undesired behavior
+   - Recoverable errors or fallback scenarios
+   - Configuration issues or missing optional features
+   - Anything that might indicate a problem but doesn't stop execution
+
+4. **ERROR** - Use for:
+   - Actual errors that prevent normal operation
+   - Exceptions and failures
+   - Critical issues that require attention
+
+### Logging Configuration
+
+The logging system uses separate file handlers for each log level:
+- `logs/debug.log` - DEBUG level and above
+- `logs/info.log` - INFO level and above
+- `logs/warning.log` - WARNING level and above
+- `logs/error.log` - ERROR level and above
+- `stdout` - All levels (DEBUG and above, configurable via STDOUT_LOG_LEVEL env var)
+
+Each file handler captures its level and all levels above it.
+
+### Third-Party Library Loggers
+
+Third-party libraries (httpx, urllib3, requests, openai, etc.) are automatically configured
+to WARNING level to suppress verbose HTTP request/response logging. These are implementation
+details, not application-level events.
+
+**IMPORTANT**: HTTP request logs (like "HTTP Request: POST https://...") are NOT INFO level.
+They are low-level implementation details and should be suppressed or logged at DEBUG/WARNING.
+If you see third-party libraries logging at INFO, configure their loggers in `logger_setup.py`.
+
+### Examples
+
+```python
+from cpr_game.logger_setup import get_logger
+
+logger = get_logger(__name__)
+
+# Flow step - use DEBUG
+logger.debug("Processing round 5...")
+logger.debug(f"API call successful: {tokens} tokens, {latency:.2f}s")
+
+# Main event - use INFO
+logger.info("Game started: game_123")
+logger.info("Experiment completed: 10 games successful")
+
+# Unexpected behavior - use WARNING
+logger.warning("Could not claim experiment (already claimed)")
+logger.warning("Database connection retry failed, will retry")
+
+# Error - use ERROR
+logger.error("Failed to initialize database", exc_info=True)
+logger.error(f"API call failed: {error}")
+```
 

@@ -105,13 +105,7 @@ class GameRunner:
             
             # Validate persona is not empty
             if not persona or persona.strip() == "":
-                # Try to use a fallback
-                available_personas = list(self.config.get("persona_prompts", {}).keys())
-                if available_personas:
-                    persona = available_personas[0]
-                    logger.warning(f"Player {i} had empty persona, using '{persona}' instead.")
-                else:
-                    raise ValueError(f"Player {i} has empty persona and no fallback personas available.")
+                raise ValueError(f"Player {i} has empty persona. Persona must be non-empty.")
 
             if self.use_mock_agents:
                 agent = MockLLMAgent(
@@ -144,8 +138,16 @@ class GameRunner:
             self.logger = LoggingManager(self.config)
             logger.info("✓ OpenTelemetry logging initialized successfully")
         except Exception as e:
-            logger.error(f"❌ ERROR: Failed to initialize OpenTelemetry: {e}")
-            raise
+            # Check if it's a configuration error (missing API key, etc.) - allow game to continue
+            error_str = str(e).lower()
+            if "api_key" in error_str or "api key" in error_str or "missing" in error_str:
+                logger.warning(f"Failed to initialize OpenTelemetry: {e}. Continuing without tracing.")
+                # Create a mock/no-op logger instead of failing
+                from .logging_manager import MockLoggingManager
+                self.logger = MockLoggingManager(self.config)
+            else:
+                logger.error(f"❌ ERROR: Failed to initialize OpenTelemetry: {e}")
+                raise
 
         # Initialize dashboard (optional)
         self.dashboard = Dashboard(self.config)
@@ -156,14 +158,17 @@ class GameRunner:
         try:
             self.db_manager = DatabaseManager(db_path=db_path, enabled=db_enabled)
             if self.db_manager.enabled and self.db_manager.conn is not None:
-                logger.info(f"Database manager initialized: {db_path}")
+                logger.debug(f"Database manager initialized: {db_path}")
             elif not db_enabled:
-                logger.info("Database manager disabled by configuration")
+                logger.debug("Database manager disabled by configuration")
             else:
-                logger.warning("Database manager initialized but connection is None")
+                error_msg = "Database manager initialized but connection is None"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
         except Exception as e:
-            logger.error(f"Failed to initialize database manager: {e}", exc_info=True)
-            self.db_manager = None
+            error_msg = f"Failed to initialize database manager: {e}"
+            logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
 
         logger.info(f"✓ Game setup complete: {self.game_id}")
 
@@ -222,9 +227,14 @@ class GameRunner:
                         system_prompt = agent.system_prompt
                     return (i, action, reasoning, api_metrics, prompt, system_prompt)
                 except Exception as e:
-                    # Log error and return default action
-                    logger.error(f"Error in agent {i}: {e}", exc_info=True)
-                    return (i, self.config['min_extraction'], f"Error: {str(e)}", None, "", None)
+                    error_msg = f"Error in agent {i}: {e}"
+                    # Don't print stack trace for rate limit errors
+                    error_str = str(e).lower()
+                    if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+                        logger.warning(error_msg)
+                    else:
+                        logger.error(error_msg, exc_info=True)
+                    raise RuntimeError(error_msg) from e
             
             # Run all agents in parallel using ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=self.config['n_players']) as executor:
@@ -242,14 +252,14 @@ class GameRunner:
                         results[player_id] = (action, reasoning, api_metrics, prompt, system_prompt)
                     except Exception as e:
                         player_id = future_to_player[future]
-                        logger.error(f"Error getting result from agent {player_id}: {e}", exc_info=True)
-                        results[player_id] = (
-                            self.config['min_extraction'],
-                            f"Error: {str(e)}",
-                            None,
-                            "",
-                            None
-                        )
+                        error_msg = f"Error getting result from agent {player_id}: {e}"
+                        # Don't print stack trace for rate limit errors
+                        error_str = str(e).lower()
+                        if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+                            logger.warning(error_msg)
+                        else:
+                            logger.error(error_msg, exc_info=True)
+                        raise RuntimeError(error_msg) from e
             
             # Process results in order
             for i in range(self.config['n_players']):
@@ -323,7 +333,7 @@ class GameRunner:
 
             # Log summary
             if verbose:
-                logger.info(format_round_summary(
+                logger.debug(format_round_summary(
                     step + 1,
                     info["resource"],
                     actions,
@@ -405,11 +415,17 @@ class GameRunner:
                 if self.db_manager.verify_game_saved(self.game_id):
                     logger.info(f"✓ Game results saved and verified for game {self.game_id}")
                 else:
-                    logger.warning(f"Game results saved but verification failed for {self.game_id}")
+                    error_msg = f"Game results saved but verification failed for {self.game_id}"
+                    logger.error(error_msg)
+                    raise RuntimeError(error_msg)
             except Exception as e:
-                logger.error(f"Failed to save game results to database: {e}", exc_info=True)
+                error_msg = f"Failed to save game results to database: {e}"
+                logger.error(error_msg, exc_info=True)
+                raise RuntimeError(error_msg) from e
         elif not self.db_manager:
-            logger.warning("Database manager not initialized - results not saved")
+            error_msg = "Database manager not initialized - results not saved"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
         elif not self.db_manager.enabled:
             logger.debug("Database saving is disabled")
 

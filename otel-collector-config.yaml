@@ -41,19 +41,19 @@ exporters:
   otlphttp/langfuse:
     endpoint: https://cloud.langfuse.com/api/public/otel
     headers:
-      x-langfuse-public-key: ${LANGFUSE_PUBLIC_KEY}
-      x-langfuse-secret-key: ${LANGFUSE_SECRET_KEY}
+      x-langfuse-public-key: pk-lf-3edc821f-ee5d-471e-a34c-6cb998ae0b91
+      x-langfuse-secret-key: sk-lf-dd59e2e9-c8fc-40d9-abd2-3cfa4f11eea9
     tls:
       insecure: false
 
   # LangSmith as OTel receiver (HTTP exporter supports full URLs)
   # Comment out if OTEL_RECEIVER="langfuse"
-  otlphttp/langsmith:
-    endpoint: https://api.smith.langchain.com/otel
-    headers:
-      x-api-key: ${LANGSMITH_API_KEY}
-    tls:
-      insecure: false
+  # otlphttp/langsmith:
+  #   endpoint: https://api.smith.langchain.com/otel
+  #   headers:
+  #     x-api-key: ${LANGSMITH_API_KEY}
+  #   tls:
+  #     insecure: false
 
   # Optional: Long-term storage (uncomment if using Tempo)
   # otlp/tempo:
@@ -69,6 +69,6 @@ service:
       # Update exporters list based on OTEL_RECEIVER:
       # - "langfuse": [otlphttp/langfuse]
       # - "langsmith": [otlphttp/langsmith]
-      # - "both": [otlphttp/langfuse, otlphttp/langsmith] (current)
-      exporters: [otlphttp/langfuse, otlphttp/langsmith]
+      # - "both": [otlphttp/langfuse, otlphttp/langsmith]
+      exporters: [otlphttp/langfuse]
 

@@ -31,8 +31,8 @@ pip install -r requirements.txt
 Create a `.env` file with your API keys and OpenTelemetry configuration:
 
 ```bash
-# OpenAI API Key (required for LLM agents)
-OPENAI_API_KEY=sk-...
+# OpenRouter API Key (required for LLM agents)
+OPENROUTER_API_KEY=sk-or-...
 
 # OpenTelemetry Configuration (Single Source of Truth)
 OTEL_SERVICE_NAME=cpr-game
@@ -78,7 +78,7 @@ print(f"Cooperation index: {summary['avg_cooperation_index']:.3f}")
 ```python
 from cpr_game import GameRunner
 
-# Requires OPENAI_API_KEY environment variable
+# Requires OPENROUTER_API_KEY environment variable
 runner = GameRunner(use_mock_agents=False)
 runner.setup_game()
 summary = runner.run_episode(verbose=True)

@@ -5,7 +5,7 @@ Modify these constants to customize game behavior.
 """
 
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 from dotenv import load_dotenv
 from .persona_prompts import PERSONA_PROMPTS, GAME_RULES_PROMPT
 
@@ -56,7 +56,7 @@ TERMINATION_CONDITIONS: List[str] = ["max_steps", "resource_depletion"]
 # ============================================================================
 
 # Model Settings
-LLM_PROVIDER: str = "openai"
+LLM_PROVIDER: str = "openrouter"
 LLM_MODEL: str = "gpt-3.5-turbo"
 LLM_TEMPERATURE: float = 0.7
 LLM_MAX_TOKENS: int = 500
@@ -81,8 +81,8 @@ USE_INCREMENTAL_PROMPTS: bool = False  # Use delta prompts (only send changes) -
 
 # OTel Settings (set via environment variables)
 OTEL_SERVICE_NAME: str = os.getenv("OTEL_SERVICE_NAME", "cpr-game")
-OTEL_ENDPOINT: str = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
-OTEL_PROTOCOL: str = os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")  # "grpc" or "http/protobuf"
+OTEL_ENDPOINT: str = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")  # HTTP port - OTLP exporter will append /v1/traces automatically
+OTEL_PROTOCOL: str = os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")  # "grpc" or "http/protobuf" - Langfuse requires HTTP
 OTEL_ENABLED: bool = os.getenv("OTEL_ENABLED", "true").lower() == "true"
 OTEL_SERVICE_VERSION: str = os.getenv("OTEL_SERVICE_VERSION", "1.0.0")
 
@@ -102,6 +102,21 @@ LANGSMITH_OTEL_ENABLED: bool = True
 LANGSMITH_API_KEY: str = os.getenv("LANGSMITH_API_KEY", "")
 LANGSMITH_PROJECT: str = os.getenv("LANGSMITH_PROJECT", "cpr-game")
 LANGSMITH_ENDPOINT: str = os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+
+# FalkorDB as OTel Receiver (via Graphiti)
+FALKORDB_ENABLED: bool = os.getenv("FALKORDB_ENABLED", "true").lower() == "true"
+FALKORDB_HOST: str = os.getenv("FALKORDB_HOST", "localhost")
+FALKORDB_PORT: int = int(os.getenv("FALKORDB_PORT", "6379"))
+FALKORDB_USERNAME: Optional[str] = os.getenv("FALKORDB_USERNAME", None)
+FALKORDB_PASSWORD: Optional[str] = os.getenv("FALKORDB_PASSWORD", None)
+FALKORDB_GROUP_ID: str = os.getenv("FALKORDB_GROUP_ID", "cpr-game-traces")
+
+# FalkorDB Exporter Retry Configuration
+FALKORDB_MAX_RETRIES: int = int(os.getenv("FALKORDB_MAX_RETRIES", "10"))  # Increased
+FALKORDB_BASE_RETRY_DELAY: float = float(os.getenv("FALKORDB_BASE_RETRY_DELAY", "5.0"))  # Increased
+FALKORDB_MAX_RETRY_DELAY: float = float(os.getenv("FALKORDB_MAX_RETRY_DELAY", "300.0"))  # Increased
+FALKORDB_EXPORT_TIMEOUT: float = float(os.getenv("FALKORDB_EXPORT_TIMEOUT", "3600.0"))  # 60 minutes
+FALKORDB_EPISODE_RATE_LIMIT: float = float(os.getenv("FALKORDB_EPISODE_RATE_LIMIT", "1.0"))  # Minimum seconds between episode additions (throttling)
 
 # Trace Settings
 LOG_LEVEL: str = "detailed"  # "minimal", "standard", "detailed"
@@ -159,10 +174,10 @@ THRESHOLD_COLOR: str = "#E74C3C"
 BACKGROUND_COLOR: str = "#FFFFFF"
 
 # ============================================================================
-# OpenAI Configuration
+# OpenRouter Configuration
 # ============================================================================
 
-OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 
 # ============================================================================
 # Configuration Dictionary
@@ -228,6 +243,19 @@ CONFIG: Dict = {
     "langsmith_project": LANGSMITH_PROJECT,
     "langsmith_endpoint": LANGSMITH_ENDPOINT,
     
+    # FalkorDB (OTel Receiver via Graphiti)
+    "falkordb_enabled": FALKORDB_ENABLED,
+    "falkordb_host": FALKORDB_HOST,
+    "falkordb_port": FALKORDB_PORT,
+    "falkordb_username": FALKORDB_USERNAME,
+    "falkordb_password": FALKORDB_PASSWORD,
+    "falkordb_group_id": FALKORDB_GROUP_ID,
+    "falkordb_max_retries": FALKORDB_MAX_RETRIES,
+    "falkordb_base_retry_delay": FALKORDB_BASE_RETRY_DELAY,
+    "falkordb_max_retry_delay": FALKORDB_MAX_RETRY_DELAY,
+    "falkordb_export_timeout": FALKORDB_EXPORT_TIMEOUT,
+    "falkordb_episode_rate_limit": FALKORDB_EPISODE_RATE_LIMIT,
+    
     # Trace Settings
     "log_level": LOG_LEVEL,
     "log_llm_prompts": LOG_LLM_PROMPTS,
@@ -251,7 +279,7 @@ CONFIG: Dict = {
     "background_color": BACKGROUND_COLOR,
 
     # API keys
-    "openai_api_key": OPENAI_API_KEY,
+    "openrouter_api_key": OPENROUTER_API_KEY,
     
     # Logging
     "log_dir": "logs",
@@ -304,15 +332,8 @@ def validate_config(config: Dict) -> bool:
     if len(config["player_personas"]) < config["n_players"]:
         raise ValueError(f"Not enough personas defined for {config['n_players']} players")
 
-    # OpenTelemetry is required - check configuration
+    # OpenTelemetry configuration - check and auto-adjust based on available keys
     if config.get("otel_enabled", True):
-        endpoint = config.get("otel_endpoint", "")
-        if not endpoint:
-            raise ValueError(
-                "OpenTelemetry endpoint is required. Set OTEL_EXPORTER_OTLP_ENDPOINT environment variable "
-                "or provide otel_endpoint in config."
-            )
-        
         # Validate OTEL_RECEIVER and check required API keys
         receiver = config.get("otel_receiver", "both").lower()
         if receiver not in ["langfuse", "langsmith", "both"]:
@@ -320,23 +341,70 @@ def validate_config(config: Dict) -> bool:
                 f"Invalid OTEL_RECEIVER value: {receiver}. Must be one of: 'langfuse', 'langsmith', 'both'"
             )
         
-        # Check Langfuse keys if receiver includes Langfuse
-        if receiver in ["langfuse", "both"]:
-            public_key = config.get("langfuse_public_key", "")
-            secret_key = config.get("langfuse_secret_key", "")
-            if not public_key or not secret_key:
+        # Check which receivers have valid API keys
+        langfuse_public_key = config.get("langfuse_public_key", "")
+        langfuse_secret_key = config.get("langfuse_secret_key", "")
+        langfuse_available = bool(langfuse_public_key and langfuse_secret_key)
+        
+        langsmith_api_key = config.get("langsmith_api_key", "")
+        langsmith_available = bool(langsmith_api_key)
+        
+        # Auto-adjust receiver based on available keys
+        if receiver == "both":
+            if langfuse_available and langsmith_available:
+                # Both available, keep "both"
+                pass
+            elif langfuse_available:
+                # Only Langfuse available
+                import logging
+                logger = logging.getLogger(__name__)
+                error_msg = (
+                    "OTEL_RECEIVER was set to 'both' but LangSmith API key is missing. "
+                    "Set LANGSMITH_API_KEY to use LangSmith, or set OTEL_RECEIVER to 'langfuse'."
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            elif langsmith_available:
+                # Only LangSmith available
+                import logging
+                logger = logging.getLogger(__name__)
+                error_msg = (
+                    "OTEL_RECEIVER was set to 'both' but Langfuse API keys are missing. "
+                    "Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY to use Langfuse, "
+                    "or set OTEL_RECEIVER to 'langsmith'."
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            else:
+                # Neither available
+                import logging
+                logger = logging.getLogger(__name__)
+                error_msg = (
+                    "OTEL_RECEIVER was set to 'both' but neither Langfuse nor LangSmith API keys are available. "
+                    "Set API keys to enable tracing, or set OTEL_RECEIVER to 'langfuse' or 'langsmith'."
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+        elif receiver == "langfuse":
+            if not langfuse_available:
                 raise ValueError(
-                    "Langfuse API keys are required when OTEL_RECEIVER includes 'langfuse'. "
+                    "Langfuse API keys are required when OTEL_RECEIVER is 'langfuse'. "
                     "Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY environment variables."
                 )
-        
-        # Check LangSmith keys if receiver includes LangSmith
-        if receiver in ["langsmith", "both"]:
-            api_key = config.get("langsmith_api_key", "")
-            if not api_key:
+        elif receiver == "langsmith":
+            if not langsmith_available:
                 raise ValueError(
-                    "LangSmith API key is required when OTEL_RECEIVER includes 'langsmith'. "
+                    "LangSmith API key is required when OTEL_RECEIVER is 'langsmith'. "
                     "Set LANGSMITH_API_KEY environment variable."
+                )
+        
+        # Check endpoint only if OTEL is still enabled after key validation
+        if config.get("otel_enabled", True):
+            endpoint = config.get("otel_endpoint", "")
+            if not endpoint:
+                raise ValueError(
+                    "OpenTelemetry endpoint is required. Set OTEL_EXPORTER_OTLP_ENDPOINT environment variable "
+                    "or provide otel_endpoint in config."
                 )
 
     return True

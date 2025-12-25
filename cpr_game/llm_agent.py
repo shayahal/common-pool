@@ -10,6 +10,10 @@ import numpy as np
 import random
 from openai import OpenAI
 from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError, AuthenticationError
+try:
+    import httpx
+except ImportError:
+    httpx = None
 from pydantic import BaseModel, Field, ValidationError
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -50,7 +54,7 @@ class LLMAgent:
             player_id: Unique identifier for this player
             persona: Persona type (e.g., "rational_selfish", "cooperative")
             config: Configuration dictionary
-            api_key: OpenAI API key (if None, reads from config)
+            api_key: OpenRouter API key (if None, reads from config)
         """
         self.player_id = player_id
         self.persona = persona
@@ -79,29 +83,39 @@ class LLMAgent:
         
         # Final fallback if persona_prompt is still empty
         if not persona_prompt or persona_prompt.strip() == "":
-            logger.warning(f"Player {self.player_id}: Invalid persona '{persona}', using 'null' persona")
-            persona_prompt = self.config["persona_prompts"].get("null", "You are a player in a resource management game.")
+            error_msg = f"Player {self.player_id}: Invalid persona '{persona}' - no valid persona prompt found"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         # Combine persona + game rules for system prompt
         # Game rules are static and don't change between rounds
         game_rules = self.config.get("game_rules_prompt", GAME_RULES_PROMPT)
         self.system_prompt = f"{persona_prompt}\n\n{game_rules}"
 
-        # Initialize OpenAI client (for API logging)
-        api_key = api_key or self.config.get("openai_api_key")
+        # Initialize OpenRouter client (for API logging)
+        api_key = api_key or self.config.get("openrouter_api_key")
         if not api_key:
             raise ValueError(
-                "OpenAI API key not found. Set OPENAI_API_KEY environment variable "
+                "OpenRouter API key not found. Set OPENROUTER_API_KEY environment variable "
                 "or pass api_key parameter."
             )
-        self.client = OpenAI(api_key=api_key)
+        # OpenRouter uses OpenAI-compatible API with custom base URL
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1"
+        )
         
-        # Initialize LangChain ChatOpenAI with structured output
+        # Initialize LangChain ChatOpenAI with structured output (using OpenRouter)
         self.llm = ChatOpenAI(
             model=self.llm_model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             timeout=self.timeout,
-            api_key=api_key
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            default_headers={
+                "HTTP-Referer": "https://github.com/your-repo",  # Optional: for OpenRouter analytics
+                "X-Title": "CPR Game"  # Optional: for OpenRouter analytics
+            }
         ).with_structured_output(AgentResponse)
 
         # Memory
@@ -152,9 +166,9 @@ class LLMAgent:
         }
         
         # Retry logic with exponential backoff for rate limits
-        max_retries = 5
-        base_delay = 1.0  # Start with 1 second
-        max_delay = 60.0  # Cap at 60 seconds
+        max_retries = 10  # Increased for rate limits
+        base_delay = 5.0  # Start with 5 seconds (increased for rate limits)
+        max_delay = 300.0  # Cap at 5 minutes (increased for rate limits)
         structured_response = None
         
         for attempt in range(max_retries):
@@ -163,8 +177,8 @@ class LLMAgent:
                 
                 # Use LangChain structured output
                 # Enable prompt caching for system message (static content, cached after first round)
-                # OpenAI's cache_control can be set via additional_kwargs on the message
-                # Note: This requires OpenAI API version that supports caching (gpt-3.5-turbo, gpt-4, etc.)
+                # OpenRouter's cache_control can be set via additional_kwargs on the message
+                # Note: This requires OpenRouter API version that supports caching (gpt-3.5-turbo, gpt-4, etc.)
                 try:
                     system_message = SystemMessage(
                         content=self.system_prompt,
@@ -172,7 +186,7 @@ class LLMAgent:
                     )
                 except (TypeError, ValueError):
                     # Fallback if cache_control not supported in this LangChain version
-                    # System message will still be cached by OpenAI if model supports it
+                    # System message will still be cached by OpenRouter if model supports it
                     system_message = SystemMessage(content=self.system_prompt)
                 
                 messages = [
@@ -194,11 +208,14 @@ class LLMAgent:
             except RateLimitError as e:
                 if attempt < max_retries - 1:
                     # Calculate exponential backoff with jitter
+                    # For rate limits, use longer delays
                     delay = min(base_delay * (2 ** attempt), max_delay)
+                    # Rate limits often need more time - double the delay
+                    delay = min(delay * 2, max_delay)
                     jitter = random.uniform(0, delay * 0.1)  # Add up to 10% jitter
                     total_delay = delay + jitter
                     
-                    logger.warning(
+                    logger.info(
                         f"Player {self.player_id}: Rate limit hit (attempt {attempt + 1}/{max_retries}). "
                         f"Retrying in {total_delay:.2f}s..."
                     )
@@ -206,9 +223,70 @@ class LLMAgent:
                     continue
                 else:
                     # Max retries reached, re-raise the error
-                    logger.error(
+                    logger.warning(
                         f"Player {self.player_id}: Rate limit error after {max_retries} attempts"
                     )
+                    raise
+            except Exception as e:
+                # Check if it's an httpx error (if httpx is available)
+                if httpx and isinstance(e, (httpx.HTTPStatusError, httpx.HTTPError)):
+                    # Catch HTTP errors including 429 from underlying HTTP client
+                    status_code = None
+                    if hasattr(e, 'response') and e.response is not None:
+                        status_code = e.response.status_code
+                    elif hasattr(e, 'status_code'):
+                        status_code = e.status_code
+                    
+                    if status_code == 429:
+                        if attempt < max_retries - 1:
+                            # Calculate exponential backoff with jitter
+                            delay = min(base_delay * (2 ** attempt), max_delay)
+                            jitter = random.uniform(0, delay * 0.1)  # Add up to 10% jitter
+                            total_delay = delay + jitter
+                            
+                            logger.info(
+                                f"Player {self.player_id}: Rate limit hit (HTTP 429, attempt {attempt + 1}/{max_retries}). "
+                                f"Retrying in {total_delay:.2f}s..."
+                            )
+                            time.sleep(total_delay)
+                            continue
+                        else:
+                            # Max retries reached, re-raise the error
+                            logger.warning(
+                                f"Player {self.player_id}: Rate limit error (HTTP 429) after {max_retries} attempts"
+                            )
+                            raise
+                    else:
+                        # Not a rate limit error, re-raise
+                        raise
+                
+                # Check if error message indicates rate limit
+                error_str = str(e).lower()
+                if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+                    if attempt < max_retries - 1:
+                        # Calculate exponential backoff with jitter
+                        # Increased delays for rate limits
+                        delay = min(base_delay * (2 ** attempt), max_delay)
+                        # For rate limits, add extra delay (rate limits often need more time)
+                        if "rate limit" in error_str or "429" in error_str:
+                            delay = min(delay * 2, max_delay)  # Double the delay for rate limits
+                        jitter = random.uniform(0, delay * 0.1)  # Add up to 10% jitter
+                        total_delay = delay + jitter
+                        
+                        logger.info(
+                            f"Player {self.player_id}: Rate limit detected (attempt {attempt + 1}/{max_retries}). "
+                            f"Retrying in {total_delay:.2f}s..."
+                        )
+                        time.sleep(total_delay)
+                        continue
+                    else:
+                        # Max retries reached, re-raise the error
+                        logger.warning(
+                            f"Player {self.player_id}: Rate limit error after {max_retries} attempts"
+                        )
+                        raise
+                else:
+                    # Not a rate limit error, re-raise
                     raise
         
         # Extract reasoning and action from structured response (after successful API call)
@@ -222,7 +300,7 @@ class LLMAgent:
             api_metrics["success"] = True
             api_metrics["latency"] = time.time() - start_time
             
-            logger.info(
+            logger.debug(
                 f"Player {self.player_id}: API call successful | "
                 f"Tokens: {api_metrics['total_tokens']} | "
                 f"Latency: {api_metrics['latency']:.2f}s"
@@ -232,10 +310,16 @@ class LLMAgent:
             api_metrics["latency"] = time.time() - start_time
             api_metrics["error"] = f"{type(e).__name__}: {str(e)}"
             
-            logger.error(
-                f"Player {self.player_id}: API error - {type(e).__name__}: {e}",
-                exc_info=True
-            )
+            # Don't print stack trace for rate limit errors
+            if isinstance(e, RateLimitError) or "429" in str(e) or "rate limit" in str(e).lower():
+                logger.warning(
+                    f"Player {self.player_id}: Rate limit error - {type(e).__name__}: {e}"
+                )
+            else:
+                logger.error(
+                    f"Player {self.player_id}: API error - {type(e).__name__}: {e}",
+                    exc_info=True
+                )
             
             # Store API metrics for retrieval
             self.last_api_metrics = api_metrics

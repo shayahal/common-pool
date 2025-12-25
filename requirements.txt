@@ -39,3 +39,6 @@ tqdm>=4.65.0
 
 # Database
 # SQLite3 is built-in to Python, no external dependency needed
+
+# FalkorDB & Graphiti for trace storage
+graphiti-core[falkordb]>=0.1.0

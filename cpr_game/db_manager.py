@@ -44,7 +44,7 @@ class DatabaseManager:
         self.access_mode = access_mode
         
         if not self.enabled:
-            logger.info("Database manager is disabled")
+            logger.debug("Database manager is disabled")
             self.conn = None
             self.read_only_conn = None
             self.db_path = None
@@ -91,14 +91,17 @@ class DatabaseManager:
             # Only create tables if in write mode
             if not read_only:
                 self._create_table()
-                logger.info(f"Database manager initialized (READ_WRITE): {db_path}")
+                logger.debug(f"Database manager initialized (READ_WRITE): {db_path}")
             else:
-                logger.info(f"Database manager initialized (READ_ONLY): {db_path}")
+                logger.debug(f"Database manager initialized (READ_ONLY): {db_path}")
         except Exception as e:
-            logger.error(f"Failed to initialize database: {e}", exc_info=True)
+            error_msg = f"Failed to initialize database: {e}"
+            logger.error(error_msg, exc_info=True)
             self.conn = None
             self.read_only_conn = None
             self.enabled = False
+            if self.enabled:  # Only raise if database was supposed to be enabled
+                raise RuntimeError(error_msg) from e
 
     def _column_exists(self, table_name: str, column_name: str) -> bool:
         """Check if a column exists in a table.
@@ -434,7 +437,9 @@ class DatabaseManager:
             
             logger.debug("Game results and experiment tables created or already exist")
         except Exception as e:
-            logger.error(f"Failed to create table: {e}", exc_info=True)
+            error_msg = f"Failed to create table: {e}"
+            logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
             raise
 
     def get_read_connection(self):
@@ -460,7 +465,10 @@ class DatabaseManager:
                 )
                 logger.debug("Created read-only connection for queries")
             except Exception as e:
-                logger.warning(f"Failed to create read-only connection: {e}, falling back to main connection")
+                error_msg = f"Failed to create read-only connection: {e}"
+                logger.error(error_msg, exc_info=True)
+                # Read-only connection is optional, but log the error
+                # Don't raise - we can fall back to main connection
                 return self.conn
         
         return self.read_only_conn
@@ -627,11 +635,9 @@ class DatabaseManager:
                 )
             
         except Exception as e:
-            logger.error(
-                f"Failed to save game results for {game_id}: {e}",
-                exc_info=True
-            )
-            # Don't raise - database errors shouldn't crash the game
+            error_msg = f"Failed to save game results for {game_id}: {e}"
+            logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
 
     def query_results(
         self,
@@ -759,7 +765,7 @@ class DatabaseManager:
         if self.conn is not None:
             try:
                 self.conn.close()
-                logger.info("Database connection closed")
+                logger.debug("Database connection closed")
             except Exception as e:
                 logger.error(f"Error closing database: {e}", exc_info=True)
             finally:

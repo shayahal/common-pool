@@ -10,6 +10,7 @@ Usage:
 """
 
 import sys
+import os
 import argparse
 import time
 import signal
@@ -41,6 +42,39 @@ def signal_handler(signum, frame):
     with shutdown_lock:
         shutdown_requested = True
     logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+    # On Windows, we can't raise KeyboardInterrupt from signal handler
+    # The main thread will check the flag periodically
+
+
+def is_shutdown_requested() -> bool:
+    """Check if shutdown has been requested."""
+    with shutdown_lock:
+        return shutdown_requested
+
+
+def interruptible_sleep(duration: float, check_interval: float = 0.1) -> None:
+    """Sleep for the specified duration, but check for shutdown periodically.
+    
+    Args:
+        duration: Total seconds to sleep
+        check_interval: How often to check for shutdown (default: 0.1 seconds)
+    
+    Raises:
+        KeyboardInterrupt: If CTRL-C is pressed during sleep
+    """
+    elapsed = 0.0
+    while elapsed < duration:
+        if is_shutdown_requested():
+            break
+        sleep_time = min(check_interval, duration - elapsed)
+        try:
+            time.sleep(sleep_time)
+        except KeyboardInterrupt:
+            # Propagate KeyboardInterrupt immediately
+            with shutdown_lock:
+                shutdown_requested = True
+            raise
+        elapsed += sleep_time
 
 
 def get_pending_experiments(db_manager: DatabaseManager, reset_stale_running: bool = True, stale_timeout_hours: int = 24) -> List[str]:
@@ -134,7 +168,7 @@ def claim_experiment(db_manager: DatabaseManager, experiment_id: str) -> bool:
         # Check if the update actually affected a row
         rows_affected = cursor.rowcount
         if rows_affected > 0:
-            logger.info(f"Claimed experiment {experiment_id} (status -> running)")
+            logger.debug(f"Claimed experiment {experiment_id} (status -> running)")
             return True
         else:
             # Another worker must have claimed it
@@ -148,7 +182,6 @@ def claim_experiment(db_manager: DatabaseManager, experiment_id: str) -> bool:
 def process_experiment(
     experiment_id: str,
     worker_id: Optional[int] = None,
-    use_mock_agents: bool = False,
     max_workers: Optional[int] = None,
     already_claimed: bool = False
 ) -> bool:
@@ -161,7 +194,6 @@ def process_experiment(
     Args:
         experiment_id: Experiment ID to process
         worker_id: Optional worker ID for logging
-        use_mock_agents: Whether to use mock agents (no API calls)
         max_workers: Maximum number of parallel workers for game execution
         already_claimed: If True, assumes experiment is already claimed (status='running')
         
@@ -186,12 +218,25 @@ def process_experiment(
             
             db_manager.close()
         
+        # Check for shutdown before starting long-running experiment
+        if is_shutdown_requested():
+            logger.info(f"{worker_prefix} Shutdown requested, aborting experiment {experiment_id}")
+            # Reset experiment to pending so another worker can pick it up
+            try:
+                db_manager = DatabaseManager(db_path=db_path, enabled=db_enabled)
+                db_manager.update_experiment_status(experiment_id, "pending")
+                db_manager.close()
+            except Exception as reset_error:
+                logger.warning(f"{worker_prefix} Failed to reset experiment {experiment_id} to pending: {reset_error}")
+            return False
+        
         # Now run the experiment (run_experiment will update status to 'completed' or 'failed' at the end)
         # Note: run_experiment also tries to update status to 'running', but since we've already claimed it,
         # this is idempotent and harmless
+        # Always use real agents (no mock agents)
         success = run_experiment(
             experiment_id=experiment_id,
-            use_mock_agents=use_mock_agents,
+            use_mock_agents=False,
             max_workers=max_workers
         )
         
@@ -214,7 +259,6 @@ def process_experiment(
 
 def worker_loop(
     worker_id: int,
-    use_mock_agents: bool,
     game_workers: Optional[int],
     poll_interval: float,
     stale_timeout_hours: int = 1
@@ -223,7 +267,6 @@ def worker_loop(
     
     Args:
         worker_id: Unique identifier for this worker
-        use_mock_agents: Whether to use mock agents
         game_workers: Maximum number of parallel workers for game execution
         poll_interval: Seconds to wait between polling cycles
         stale_timeout_hours: Hours after which a 'running' experiment is considered stale (default: 1)
@@ -236,10 +279,9 @@ def worker_loop(
     
     while True:
         # Check for shutdown
-        with shutdown_lock:
-            if shutdown_requested:
-                logger.info(f"[Worker {worker_id}] Shutdown requested, exiting")
-                break
+        if is_shutdown_requested():
+            logger.info(f"[Worker {worker_id}] Shutdown requested, exiting")
+            break
         
         try:
             # Initialize database manager for this iteration
@@ -248,7 +290,7 @@ def worker_loop(
             if not db_manager.enabled:
                 logger.error(f"[Worker {worker_id}] Database is not enabled, waiting...")
                 db_manager.close()
-                time.sleep(poll_interval)
+                interruptible_sleep(poll_interval)
                 continue
             
             # Get pending experiments (also resets stale running experiments)
@@ -263,31 +305,40 @@ def worker_loop(
                 # Log at INFO level periodically so user can see the worker is active and polling
                 # Only log every 6th poll (every 30s with 5s interval) to reduce log spam
                 if poll_count % 6 == 0:
-                    logger.info(f"[Worker {worker_id}] No pending experiments found (polling every {poll_interval}s, checked {poll_count} times)...")
-                time.sleep(poll_interval)
+                    logger.info(f"[Worker {worker_id}] No pending experiments found (polling every {poll_interval}s)...")
+                interruptible_sleep(poll_interval)
                 continue
             
             # Try to claim and process one experiment
             claimed = False
             for experiment_id in pending_experiments:
                 # Double-check shutdown before processing
-                with shutdown_lock:
-                    if shutdown_requested:
-                        logger.info(f"[Worker {worker_id}] Shutdown requested during experiment claim")
-                        return
+                if is_shutdown_requested():
+                    logger.info(f"[Worker {worker_id}] Shutdown requested during experiment claim")
+                    return
                 
                 # Try to claim this experiment
                 db_manager = DatabaseManager(db_path=db_path, enabled=db_enabled)
                 if claim_experiment(db_manager, experiment_id):
                     db_manager.close()
                     claimed = True
-                    logger.info(f"[Worker {worker_id}] Successfully claimed experiment {experiment_id}, starting processing...")
+                    logger.debug(f"[Worker {worker_id}] Successfully claimed experiment {experiment_id}, starting processing...")
+                    # Check shutdown one more time before starting long-running process
+                    if is_shutdown_requested():
+                        logger.info(f"[Worker {worker_id}] Shutdown requested, skipping experiment {experiment_id}")
+                        # Reset experiment to pending so another worker can pick it up
+                        try:
+                            db_manager = DatabaseManager(db_path=db_path, enabled=db_enabled)
+                            db_manager.update_experiment_status(experiment_id, "pending")
+                            db_manager.close()
+                        except Exception as reset_error:
+                            logger.warning(f"[Worker {worker_id}] Failed to reset experiment {experiment_id} to pending: {reset_error}")
+                        break
                     # Process the experiment (already claimed, so pass already_claimed=True)
                     try:
                         process_experiment(
                             experiment_id=experiment_id,
                             worker_id=worker_id,
-                            use_mock_agents=use_mock_agents,
                             max_workers=game_workers,
                             already_claimed=True
                         )
@@ -302,11 +353,11 @@ def worker_loop(
             if not claimed:
                 # Could not claim any experiment (all were already claimed by other workers)
                 logger.debug(f"[Worker {worker_id}] Could not claim any experiment (already claimed by other workers), waiting {poll_interval}s...")
-                time.sleep(poll_interval)
+                interruptible_sleep(poll_interval)
                 
         except Exception as e:
             logger.error(f"[Worker {worker_id}] Error in worker loop: {e}", exc_info=True)
-            time.sleep(poll_interval)
+            interruptible_sleep(poll_interval)
     
     logger.info(f"[Worker {worker_id}] Worker loop ended")
 
@@ -320,7 +371,6 @@ def main():
 Examples:
   python experiment_worker.py --workers 4
   python experiment_worker.py --workers 4 --poll-interval 10
-  python experiment_worker.py --workers 4 --use-mock
   python experiment_worker.py --workers 4 --game-workers 5
         """
     )
@@ -347,12 +397,6 @@ Examples:
     )
     
     parser.add_argument(
-        "--use-mock",
-        action="store_true",
-        help="Use mock agents (no API calls)"
-    )
-    
-    parser.add_argument(
         "--stale-timeout-hours",
         type=int,
         default=1,
@@ -373,8 +417,19 @@ Examples:
     logger.info(f"Logging initialized (logs directory: {log_dir})")
     
     # Setup signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    # Note: On Windows, signal handlers can interfere with KeyboardInterrupt
+    # So we only set them on Unix-like systems
+    import platform
+    if platform.system() != 'Windows':
+        try:
+            signal.signal(signal.SIGINT, signal_handler)
+        except (AttributeError, ValueError):
+            pass
+        try:
+            signal.signal(signal.SIGTERM, signal_handler)
+        except (AttributeError, ValueError):
+            pass
+    # On Windows, we rely on KeyboardInterrupt being raised directly
     
     logger.info("=" * 60)
     logger.info("EXPERIMENT WORKER STARTING")
@@ -383,7 +438,7 @@ Examples:
     logger.info(f"Game workers per experiment: {args.game_workers or 'auto'}")
     logger.info(f"Poll interval: {args.poll_interval}s")
     logger.info(f"Stale timeout: {args.stale_timeout_hours} hours")
-    logger.info(f"Agent mode: {'MOCK (no API calls)' if args.use_mock else 'REAL (API calls enabled)'}")
+    logger.info(f"Agent mode: REAL (API calls enabled)")
     logger.info("=" * 60)
     
     # Start worker threads
@@ -391,7 +446,7 @@ Examples:
     for worker_id in range(args.workers):
         thread = threading.Thread(
             target=worker_loop,
-            args=(worker_id, args.use_mock, args.game_workers, args.poll_interval, args.stale_timeout_hours),
+            args=(worker_id, args.game_workers, args.poll_interval, args.stale_timeout_hours),
             name=f"Worker-{worker_id}",
             daemon=False  # Don't allow daemon threads so they can finish gracefully
         )
@@ -400,20 +455,31 @@ Examples:
         logger.info(f"Started worker {worker_id}")
     
     try:
-        # Wait for all worker threads
-        for thread in worker_threads:
-            thread.join()
-        logger.info("All workers finished")
+        # Wait for all worker threads, but check for shutdown periodically
+        while True:
+            # Check if shutdown was requested
+            if is_shutdown_requested():
+                logger.info("Shutdown requested, exiting immediately...")
+                os._exit(0)
+            
+            # Check if all threads are done
+            all_done = all(not thread.is_alive() for thread in worker_threads)
+            if all_done:
+                logger.info("All workers finished")
+                break
+            
+            # Wait a short time and check again
+            # Use try/except to catch KeyboardInterrupt immediately
+            try:
+                interruptible_sleep(0.5)
+            except KeyboardInterrupt:
+                logger.info("Keyboard interrupt received (CTRL-C), exiting immediately...")
+                # Exit immediately without waiting for threads
+                os._exit(0)
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received, shutting down...")
-        with shutdown_lock:
-            shutdown_requested = True
-        
-        # Wait for threads to finish (with timeout)
-        for thread in worker_threads:
-            thread.join(timeout=30.0)
-            if thread.is_alive():
-                logger.warning(f"Worker thread {thread.name} did not finish within timeout")
+        logger.info("Keyboard interrupt received (CTRL-C), exiting immediately...")
+        # Exit immediately without waiting for threads
+        os._exit(0)
     
     logger.info("=" * 60)
     logger.info("EXPERIMENT WORKER SHUTDOWN COMPLETE")

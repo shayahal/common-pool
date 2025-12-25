@@ -2,14 +2,11 @@
 
 Runs experiments defined in the database with parallel game execution.
 
-Usage:
-    python main.py --experiment-id exp_123
-    python main.py --experiment-id exp_123 --use-mock
-    python main.py --experiment-id exp_123 --max-workers 5
+This module provides the run_experiment() function which is used by experiment_worker.py.
+Experiments should only be run via experiment_worker.py, not directly from this module.
 """
 
 import sys
-import argparse
 import random
 import time
 from pathlib import Path
@@ -280,17 +277,17 @@ def run_experiment(
                             )
                             if save_success:
                                 successful_games += 1
-                                logger.info(f"[Game {game_index:04d}] ✓ Successfully completed and saved")
+                                logger.info(f"[Game {game_index:04d}] [OK] Successfully completed and saved")
                             else:
                                 failed_games += 1
-                                logger.error(f"[Game {game_index:04d}] ✗ Game completed but failed to save to database")
+                                logger.error(f"[Game {game_index:04d}] [FAIL] Game completed but failed to save to database")
                             pbar.set_postfix({
                                 "success": successful_games,
                                 "failed": failed_games
                             })
                         else:
                             failed_games += 1
-                            logger.warning(f"[Game {game_index:04d}] ✗ Game failed (returned None)")
+                            logger.warning(f"[Game {game_index:04d}] [FAIL] Game failed (returned None)")
                             pbar.set_postfix({
                                 "success": successful_games,
                                 "failed": failed_games
@@ -298,7 +295,7 @@ def run_experiment(
                         
                     except Exception as e:
                         failed_games += 1
-                        logger.error(f"[Game {game_index:04d}] ✗ Error processing game: {e}", exc_info=True)
+                        logger.error(f"[Game {game_index:04d}] [FAIL] Error processing game: {e}", exc_info=True)
                         pbar.set_postfix({
                             "success": successful_games,
                             "failed": failed_games
@@ -329,16 +326,16 @@ def run_experiment(
         db_manager.update_experiment_status(experiment_id, status)
         logger.info("=" * 60)
         
-        # Print summary
-        print("\n" + "=" * 60)
-        print("EXPERIMENT SUMMARY")
-        print("=" * 60)
-        print(f"Experiment: {experiment['name']} ({experiment_id})")
-        print(f"Total Games: {number_of_games}")
-        print(f"Successful: {successful_games}")
-        print(f"Failed: {failed_games}")
-        print(f"Status: {status}")
-        print("=" * 60 + "\n")
+        # Log summary
+        logger.info("\n" + "=" * 60)
+        logger.info("EXPERIMENT SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"Experiment: {experiment['name']} ({experiment_id})")
+        logger.info(f"Total Games: {number_of_games}")
+        logger.info(f"Successful: {successful_games}")
+        logger.info(f"Failed: {failed_games}")
+        logger.info(f"Status: {status}")
+        logger.info("=" * 60 + "\n")
         
         return successful_games > 0
     finally:
@@ -351,57 +348,6 @@ def run_experiment(
                 logger.warning(f"Error closing database connection: {e}")
 
 
-def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="Run CPR Game experiments",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python main.py --experiment-id exp_123
-  python main.py --experiment-id exp_123 --use-mock
-  python main.py --experiment-id exp_123 --max-workers 5
-        """
-    )
-    
-    parser.add_argument(
-        "--experiment-id",
-        type=str,
-        required=True,
-        help="Experiment ID to run"
-    )
-    
-    parser.add_argument(
-        "--use-mock",
-        action="store_true",
-        help="Use mock agents (no API calls)"
-    )
-    
-    parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=None,
-        help="Maximum number of parallel workers (default: min(10, number_of_games))"
-    )
-    
-    args = parser.parse_args()
-    
-    # Setup logging
-    log_dir = CONFIG.get("log_dir", "logs")
-    setup_logging(log_dir=log_dir)
-    logger.info(f"Logging initialized (logs directory: {log_dir})")
-    
-    # Run experiment
-    success = run_experiment(
-        experiment_id=args.experiment_id,
-        use_mock_agents=args.use_mock,
-        max_workers=args.max_workers
-    )
-    
-    # Exit with appropriate code
-    sys.exit(0 if success else 1)
-
-
-if __name__ == "__main__":
-    main()
+# Note: This module is intended to be imported by experiment_worker.py only.
+# Do not run experiments directly from this module. Use experiment_worker.py instead.
 

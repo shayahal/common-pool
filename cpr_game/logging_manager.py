@@ -58,8 +58,16 @@ class LoggingManager:
             if self.tracer is None:
                 logger.warning("OpenTelemetry is disabled - tracing will be no-op")
         except Exception as e:
-            logger.error(f"Failed to initialize OpenTelemetry: {e}", exc_info=True)
-            raise RuntimeError(f"Failed to initialize OpenTelemetry: {e}") from e
+            # Check if it's a configuration error (missing API key, etc.) - don't print stack trace
+            error_str = str(e).lower()
+            if "api_key" in error_str or "api key" in error_str or "missing" in error_str:
+                logger.warning(f"Failed to initialize OpenTelemetry: {e}. Tracing will be disabled.")
+                self.otel_manager = None
+                self.tracer = None
+            else:
+                # For unexpected errors, log with stack trace
+                logger.error(f"Failed to initialize OpenTelemetry: {e}", exc_info=True)
+                raise RuntimeError(f"Failed to initialize OpenTelemetry: {e}") from e
 
         # Game tracking
         self.game_id = None
@@ -97,6 +105,8 @@ class LoggingManager:
                     "game.initial_resource": config.get("initial_resource", 1000),
                 }
             )
+            # Enter the context manager to activate the span
+            self.current_trace.__enter__()
             
             # Create game_setup span
             with self.tracer.start_as_current_span(
@@ -110,8 +120,9 @@ class LoggingManager:
             
             logger.info(f"Starting game tracking for game_id: {game_id}")
         except Exception as e:
-            logger.error(f"Error starting game trace: {e}", exc_info=True)
-            # Don't raise - continue without tracing if it fails
+            error_msg = f"Error starting game trace: {e}"
+            logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
 
     def set_current_round(self, round_num: int):
         """Set the current round number and create round span.
@@ -126,10 +137,18 @@ class LoggingManager:
 
         try:
             # End previous round span if exists
+            # The context manager automatically ends when exited, but we need to exit it properly
             if self.current_round_span is not None:
-                self.current_round_span.end()
+                try:
+                    # Exit the previous context manager
+                    self.current_round_span.__exit__(None, None, None)
+                except Exception as e:
+                    error_msg = f"Error exiting previous round span: {e}"
+                    logger.error(error_msg, exc_info=True)
+                    raise RuntimeError(error_msg) from e
+                self.current_round_span = None
 
-            # Start new round span
+            # Start new round span (returns a context manager)
             self.current_round_span = self.tracer.start_as_current_span(
                 f"round_{round_num}",
                 attributes={
@@ -137,8 +156,12 @@ class LoggingManager:
                     "game.id": self.game_id,
                 }
             )
+            # Enter the context manager to activate the span
+            self.current_round_span.__enter__()
         except Exception as e:
-            logger.warning(f"Error creating round span: {e}", exc_info=True)
+            error_msg = f"Error creating round span: {e}"
+            logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
 
     def log_generation(
         self,
@@ -219,9 +242,9 @@ class LoggingManager:
                 
                 player_span.add_event("action.extracted", {"action": float(action)})
 
-            # Debug log
+            # Debug log for API calls
             if api_metrics:
-                logger.info(
+                logger.debug(
                     f"✅ Logged trace via OTel: {self.game_id}_round_{self.current_round}_player_{player_id} | "
                     f"Tokens: {api_metrics.get('total_tokens', 'N/A')} | "
                     f"Latency: {api_metrics.get('latency', 0):.2f}s | "
@@ -234,10 +257,11 @@ class LoggingManager:
             self._store_generation_data(player_id, prompt, response, action, reasoning, api_metrics)
 
         except Exception as e:
-            logger.error(f"Error logging generation: {e}", exc_info=True)
-            # Don't raise - continue even if tracing fails
-            # Still store data for dashboard/metrics
+            error_msg = f"Error logging generation: {e}"
+            logger.error(error_msg, exc_info=True)
+            # Still store data for dashboard/metrics before raising
             self._store_generation_data(player_id, prompt, response, action, reasoning, api_metrics)
+            raise RuntimeError(error_msg) from e
 
     def _store_generation_data(
         self,
@@ -307,7 +331,9 @@ class LoggingManager:
                             {"player_id": i, "payoff": float(payoff)}
                         )
         except Exception as e:
-            logger.warning(f"Error logging round metrics: {e}", exc_info=True)
+            error_msg = f"Error logging round metrics: {e}"
+            logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
 
     def end_game_trace(self, summary: Dict):
         """Finalize game and flush traces.
@@ -322,8 +348,20 @@ class LoggingManager:
         try:
             # End current round span if exists
             if self.current_round_span is not None:
-                self.current_round_span.end()
-                self.current_round_span = None
+                try:
+                    # Exit the context manager properly
+                    self.current_round_span.__exit__(None, None, None)
+                except RuntimeError as e:
+                    # "generator didn't stop" means the context wasn't properly entered
+                    if "generator didn't stop" in str(e):
+                        logger.warning(f"Round span context already closed or not properly entered")
+                    else:
+                        raise
+                except Exception as e:
+                    error_msg = f"Error exiting current round span: {e}"
+                    logger.warning(error_msg)
+                finally:
+                    self.current_round_span = None
 
             # Create game_summary span
             with self.tracer.start_as_current_span(
@@ -341,8 +379,24 @@ class LoggingManager:
 
             # End root trace
             if self.current_trace is not None:
-                self.current_trace.end()
-                self.current_trace = None
+                try:
+                    # Exit the context manager properly
+                    # Check if it's already exited by trying to get the span
+                    try:
+                        self.current_trace.__exit__(None, None, None)
+                    except RuntimeError as e:
+                        # "generator didn't stop" means the context wasn't properly entered
+                        # This can happen if the span was never entered or already exited
+                        if "generator didn't stop" in str(e):
+                            logger.warning(f"Trace context already closed or not properly entered for game {self.game_id}")
+                        else:
+                            raise
+                except Exception as e:
+                    error_msg = f"Error exiting root trace: {e}"
+                    # Don't raise for context manager errors - just log and continue
+                    logger.warning(error_msg)
+                finally:
+                    self.current_trace = None
 
             # Flush all pending spans
             logger.info("Flushing OTel traces...")
@@ -350,8 +404,13 @@ class LoggingManager:
             logger.info("✓ Successfully flushed all traces via OTel")
 
         except Exception as e:
-            logger.error(f"Error ending game trace: {e}", exc_info=True)
-            # Don't raise - we want to continue even if flush fails
+            error_msg = f"Error ending game trace: {e}"
+            # Don't raise - just log warning and continue
+            # This allows games to complete even if tracing has issues
+            logger.warning(error_msg)
+            # Clean up trace references
+            self.current_trace = None
+            self.current_round_span = None
 
     def get_round_metrics(self) -> List[Dict]:
         """Get all collected round metrics.
@@ -389,11 +448,13 @@ class LoggingManager:
 
     def __del__(self):
         """Cleanup: flush any pending traces."""
-        if hasattr(self, 'otel_manager'):
+        if hasattr(self, 'otel_manager') and self.otel_manager is not None:
             try:
                 self.otel_manager.flush()
             except Exception as e:
-                logger.warning(f"Error flushing traces during cleanup: {e}", exc_info=True)
+                # In __del__, we can't raise exceptions, but we log the error
+                # Use warning instead of error since this is cleanup
+                logger.debug(f"Error flushing traces during cleanup: {e}")
 
 
 class MockLoggingManager(LoggingManager):
