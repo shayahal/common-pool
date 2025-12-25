@@ -59,11 +59,16 @@ class GraphitiPlayground:
             if isinstance(port, str):
                 port = int(port)
             
+            # Try to use group_id as database name, fallback to default_db
+            # In FalkorDB, the graph name might match the group_id
+            database_name = CONFIG.get("falkordb_group_id", "cpr-game-traces")
+            
             falkor_driver = FalkorDriver(
                 host=CONFIG.get("falkordb_host", "localhost"),
                 port=port,
                 username=CONFIG.get("falkordb_username"),
                 password=CONFIG.get("falkordb_password"),
+                database=database_name,  # Use group_id as database name
             )
             self.graphiti = Graphiti(graph_driver=falkor_driver)
             
