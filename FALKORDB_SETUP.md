@@ -13,7 +13,50 @@ The integration sends all OpenTelemetry traces to a local FalkorDB instance usin
 
 ## Step 1: Start FalkorDB
 
-Start a local FalkorDB instance using Docker:
+FalkorDB will **automatically start** when needed by the application. However, you can also manage it manually:
+
+### Automatic Startup
+
+FalkorDB is automatically started when:
+- The FalkorDB exporter is initialized (if `FALKORDB_ENABLED=true`)
+- The application detects FalkorDB is not running
+
+### Manual Management
+
+You can manage FalkorDB using the management script:
+
+```bash
+# Check status
+python manage_falkordb.py status
+
+# Start FalkorDB
+python manage_falkordb.py start
+
+# Stop FalkorDB
+python manage_falkordb.py stop
+
+# Restart FalkorDB
+python manage_falkordb.py restart
+```
+
+### Using Docker Compose
+
+FalkorDB is also available in `docker-compose.yml`:
+
+```bash
+# Start FalkorDB (and other services)
+docker compose up -d falkordb
+
+# Stop FalkorDB
+docker compose stop falkordb
+
+# View status
+docker compose ps falkordb
+```
+
+### Manual Docker Command (Alternative)
+
+If you prefer to use Docker directly:
 
 ```bash
 docker run -d --name falkordb -p 6379:6379 -p 3000:3000 falkordb/falkordb:latest
@@ -111,8 +154,11 @@ Application (Python)
 ### FalkorDB Connection Failed
 
 - Ensure Docker is running: `docker ps`
+- Check status: `python manage_falkordb.py status`
+- Start FalkorDB: `python manage_falkordb.py start`
+- Or use docker-compose: `docker compose up -d falkordb`
 - Check if container exists: `docker ps -a | grep falkordb`
-- Start container: `docker start falkordb` (if it exists)
+- Start existing container: `docker start falkordb` (if it exists)
 - Or create new: `docker run -d --name falkordb -p 6379:6379 -p 3000:3000 falkordb/falkordb:latest`
 
 ### No Traces Found
@@ -132,9 +178,26 @@ Application (Python)
 The FalkorDB exporter is automatically enabled if:
 1. `FALKORDB_ENABLED=true` (default: true)
 2. Graphiti is installed
-3. FalkorDB is accessible
+3. FalkorDB is accessible (will be started automatically if not running)
 
 You can disable it by setting `FALKORDB_ENABLED=false`.
+
+## Stopping FalkorDB
+
+To stop FalkorDB when not needed:
+
+```bash
+# Using the management script (recommended)
+python manage_falkordb.py stop
+
+# Using docker-compose
+docker compose stop falkordb
+
+# Using docker directly
+docker stop falkordb
+```
+
+**Note:** FalkorDB will automatically start again when the application needs it (if `FALKORDB_ENABLED=true`).
 
 ## Next Steps
 

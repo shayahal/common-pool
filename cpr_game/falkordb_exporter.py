@@ -26,6 +26,7 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 from .logger_setup import get_logger
+from .falkordb_manager import ensure_falkordb_running
 
 logger = get_logger(__name__)
 
@@ -92,6 +93,15 @@ class FalkorDBExporter(SpanExporter):
         self._port = port
         self._username = username
         self._password = password
+        
+        # Ensure FalkorDB container is running before attempting connection
+        if not ensure_falkordb_running():
+            error_msg = (
+                "Failed to start FalkorDB container. "
+                "Please ensure Docker is running and try again."
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
         
         # Initialize Graphiti connection (test that it works)
         try:
