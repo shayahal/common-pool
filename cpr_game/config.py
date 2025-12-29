@@ -103,21 +103,6 @@ LANGSMITH_API_KEY: str = os.getenv("LANGSMITH_API_KEY", "")
 LANGSMITH_PROJECT: str = os.getenv("LANGSMITH_PROJECT", "cpr-game")
 LANGSMITH_ENDPOINT: str = os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
 
-# FalkorDB as OTel Receiver (via Graphiti)
-FALKORDB_ENABLED: bool = os.getenv("FALKORDB_ENABLED", "true").lower() == "true"
-FALKORDB_HOST: str = os.getenv("FALKORDB_HOST", "localhost")
-FALKORDB_PORT: int = int(os.getenv("FALKORDB_PORT", "6379"))
-FALKORDB_USERNAME: Optional[str] = os.getenv("FALKORDB_USERNAME", None)
-FALKORDB_PASSWORD: Optional[str] = os.getenv("FALKORDB_PASSWORD", None)
-FALKORDB_GROUP_ID: str = os.getenv("FALKORDB_GROUP_ID", "cpr-game-traces")
-
-# FalkorDB Exporter Retry Configuration
-FALKORDB_MAX_RETRIES: int = int(os.getenv("FALKORDB_MAX_RETRIES", "10"))  # Increased
-FALKORDB_BASE_RETRY_DELAY: float = float(os.getenv("FALKORDB_BASE_RETRY_DELAY", "5.0"))  # Increased
-FALKORDB_MAX_RETRY_DELAY: float = float(os.getenv("FALKORDB_MAX_RETRY_DELAY", "300.0"))  # Increased
-FALKORDB_EXPORT_TIMEOUT: float = float(os.getenv("FALKORDB_EXPORT_TIMEOUT", "3600.0"))  # 60 minutes
-FALKORDB_EPISODE_RATE_LIMIT: float = float(os.getenv("FALKORDB_EPISODE_RATE_LIMIT", "1.0"))  # Minimum seconds between episode additions (throttling)
-
 # Trace Settings
 LOG_LEVEL: str = "detailed"  # "minimal", "standard", "detailed"
 LOG_LLM_PROMPTS: bool = True
@@ -242,19 +227,6 @@ CONFIG: Dict = {
     "langsmith_api_key": LANGSMITH_API_KEY,
     "langsmith_project": LANGSMITH_PROJECT,
     "langsmith_endpoint": LANGSMITH_ENDPOINT,
-    
-    # FalkorDB (OTel Receiver via Graphiti)
-    "falkordb_enabled": FALKORDB_ENABLED,
-    "falkordb_host": FALKORDB_HOST,
-    "falkordb_port": FALKORDB_PORT,
-    "falkordb_username": FALKORDB_USERNAME,
-    "falkordb_password": FALKORDB_PASSWORD,
-    "falkordb_group_id": FALKORDB_GROUP_ID,
-    "falkordb_max_retries": FALKORDB_MAX_RETRIES,
-    "falkordb_base_retry_delay": FALKORDB_BASE_RETRY_DELAY,
-    "falkordb_max_retry_delay": FALKORDB_MAX_RETRY_DELAY,
-    "falkordb_export_timeout": FALKORDB_EXPORT_TIMEOUT,
-    "falkordb_episode_rate_limit": FALKORDB_EPISODE_RATE_LIMIT,
     
     # Trace Settings
     "log_level": LOG_LEVEL,

@@ -231,69 +231,12 @@ class OTelManager:
         span_processor = BatchSpanProcessor(exporter)
         self.tracer_provider.add_span_processor(span_processor)
         
-        # Add FalkorDB exporter if enabled
-        # NO SILENT FAILURES - if FalkorDB is enabled, it MUST work
-        if self.config.get("falkordb_enabled", False):
-            try:
-                from .falkordb_exporter import FalkorDBExporter
-                falkordb_exporter = FalkorDBExporter(
-                    host=self.config.get("falkordb_host", "localhost"),
-                    port=self.config.get("falkordb_port", 6379),
-                    username=self.config.get("falkordb_username"),
-                    password=self.config.get("falkordb_password"),
-                    group_id=self.config.get("falkordb_group_id", "cpr-game-traces"),
-                    enabled=self.config.get("falkordb_enabled", True),
-                    max_retries=self.config.get("falkordb_max_retries", 10),  # Increased for rate limits
-                    base_retry_delay=self.config.get("falkordb_base_retry_delay", 5.0),  # Increased base delay
-                    max_retry_delay=self.config.get("falkordb_max_retry_delay", 300.0),  # 5 minutes max delay
-                    export_timeout=self.config.get("falkordb_export_timeout", 60 * 60.0),  # 60 minutes default
-                    episode_rate_limit=self.config.get("falkordb_episode_rate_limit", 1.0)  # Throttle episode additions
-                )
-                # Only add processor if exporter is actually enabled
-                if falkordb_exporter.enabled:
-                    falkordb_processor = BatchSpanProcessor(falkordb_exporter)
-                    self.tracer_provider.add_span_processor(falkordb_processor)
-                    logger.info("FalkorDB exporter enabled and registered")
-                else:
-                    # If enabled in config but exporter is disabled, this is a FATAL error
-                    error_msg = (
-                        "FalkorDB is enabled in config but exporter initialization failed. "
-                        "This is a FATAL error - FalkorDB export will not work. "
-                        "Check logs for details."
-                    )
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg)
-            except ImportError as e:
-                # Missing dependency is a fatal error if FalkorDB is enabled
-                error_msg = (
-                    f"FalkorDB is enabled but required dependencies are missing: {e}. "
-                    "Install with: pip install graphiti-core[falkordb]"
-                )
-                logger.error(error_msg)
-                raise RuntimeError(error_msg) from e
-            except Exception as e:
-                # Any other error is fatal if FalkorDB is enabled
-                error_str = str(e).lower()
-                if "api_key" in error_str or "api key" in error_str:
-                    error_msg = (
-                        f"FalkorDB is enabled but OPENAI_API_KEY is missing. "
-                        f"This is a FATAL error. Set OPENAI_API_KEY environment variable. Error: {e}"
-                    )
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg) from e
-                else:
-                    error_msg = f"FalkorDB is enabled but initialization failed. This is a FATAL error: {e}"
-                    logger.error(error_msg, exc_info=True)
-                    raise RuntimeError(error_msg) from e
-        
         # Track if we created the provider ourselves (for flush/shutdown)
         self._provider_owned = True
         
         # Set global tracer provider only if one doesn't exist
         # This prevents "Overriding of current TracerProvider is not allowed" warnings
         # when multiple games run in parallel
-        # IMPORTANT: If FalkorDB is enabled, we MUST use our own provider to ensure
-        # the exporter is registered, because ProxyTracerProvider doesn't support add_span_processor
         try:
             current_provider = trace.get_tracer_provider()
             # Check if it's a real provider (not NoOpTracerProvider)
@@ -301,112 +244,14 @@ class OTelManager:
             from opentelemetry.trace import NoOpTracerProvider, ProxyTracerProvider
             from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
             
-            # If FalkorDB is enabled, we need our own provider (not ProxyTracerProvider)
-            falkordb_enabled = self.config.get("falkordb_enabled", False)
             is_proxy = isinstance(current_provider, ProxyTracerProvider)
             is_sdk = isinstance(current_provider, SDKTracerProvider)
             
             if not isinstance(current_provider, NoOpTracerProvider):
-                if falkordb_enabled and (is_proxy or not is_sdk):
-                    # We need our own provider for FalkorDB - ProxyTracerProvider can't add processors
-                    logger.info("Creating new tracer provider for FalkorDB export (cannot use ProxyTracerProvider)")
-                    # Don't reuse - use our own provider (FalkorDB exporter already added above)
-                    trace.set_tracer_provider(self.tracer_provider)
-                    # Skip the "reused provider" logic since we're using our own - FalkorDB exporter already added
-                else:
-                    # Provider already exists and is suitable, reuse it
-                    logger.debug("Reusing existing tracer provider")
-                    self.tracer_provider = current_provider
-                    self._provider_owned = False  # We didn't create it, so don't flush/shutdown
-                    
-                    # IMPORTANT: Even when reusing a provider, we need to ensure FalkorDB exporter is added
-                    # because the existing provider might not have it (e.g., from a previous game that failed to init)
-                    if falkordb_enabled:
-                        # Check if FalkorDB exporter is already added by checking span processors
-                        # Note: This is a best-effort check - we'll try to add it anyway
-                        has_falkordb = False
-                        try:
-                            from .falkordb_exporter import FalkorDBExporter
-                            # Check if we already have a FalkorDB processor
-                            try:
-                                # Try to access span processors - different tracer providers have different attributes
-                                span_processors = None
-                                if hasattr(self.tracer_provider, '_span_processors'):
-                                    span_processors = self.tracer_provider._span_processors
-                                elif hasattr(self.tracer_provider, 'span_processors'):
-                                    span_processors = self.tracer_provider.span_processors
-                                elif hasattr(self.tracer_provider, '_sdk_span_processor'):
-                                    # Some providers wrap processors
-                                    span_processors = [self.tracer_provider._sdk_span_processor]
-                                
-                                if span_processors:
-                                    for processor in span_processors:
-                                        exporter = None
-                                        if hasattr(processor, '_span_exporter'):
-                                            exporter = processor._span_exporter
-                                        elif hasattr(processor, 'span_exporter'):
-                                            exporter = processor.span_exporter
-                                        
-                                        if exporter and isinstance(exporter, FalkorDBExporter):
-                                            has_falkordb = True
-                                            logger.info("FalkorDB exporter already present in reused provider")
-                                            break
-                            except Exception as e:
-                                logger.debug(f"Could not check for existing FalkorDB exporter: {e}")
-                                # Assume it's not there and try to add it
-                        except Exception as e:
-                            # If we can't check or add the exporter, this is a FATAL error
-                            error_msg = f"Failed to ensure FalkorDB exporter is registered: {e}. This is a FATAL error."
-                            logger.error(error_msg, exc_info=True)
-                            raise RuntimeError(error_msg) from e
-                        
-                        if not has_falkordb:
-                            # Add FalkorDB exporter to the reused provider
-                            # NO SILENT FAILURES - if FalkorDB is enabled, it MUST be added
-                            try:
-                                logger.info("Adding FalkorDB exporter to reused tracer provider")
-                                falkordb_exporter = FalkorDBExporter(
-                                    host=self.config.get("falkordb_host", "localhost"),
-                                    port=self.config.get("falkordb_port", 6379),
-                                    username=self.config.get("falkordb_username"),
-                                    password=self.config.get("falkordb_password"),
-                                    group_id=self.config.get("falkordb_group_id", "cpr-game-traces"),
-                                    enabled=self.config.get("falkordb_enabled", True),
-                                    max_retries=self.config.get("falkordb_max_retries", 10),  # Increased for rate limits
-                                    base_retry_delay=self.config.get("falkordb_base_retry_delay", 5.0),  # Increased base delay
-                                    max_retry_delay=self.config.get("falkordb_max_retry_delay", 300.0),  # 5 minutes max delay
-                                    export_timeout=self.config.get("falkordb_export_timeout", 60 * 60.0),  # 60 minutes default
-                                    episode_rate_limit=self.config.get("falkordb_episode_rate_limit", 1.0)  # Throttle episode additions
-                                )
-                                if not falkordb_exporter.enabled:
-                                    error_msg = "FalkorDB exporter initialization failed when adding to reused provider - FATAL error"
-                                    logger.error(error_msg)
-                                    raise RuntimeError(error_msg)
-                                
-                                falkordb_processor = BatchSpanProcessor(falkordb_exporter)
-                                # ProxyTracerProvider doesn't have add_span_processor - need to get underlying provider
-                                actual_provider = self.tracer_provider
-                                if hasattr(self.tracer_provider, '_delegate'):
-                                    # ProxyTracerProvider wraps the actual provider
-                                    actual_provider = self.tracer_provider._delegate
-                                elif hasattr(self.tracer_provider, '_provider'):
-                                    actual_provider = self.tracer_provider._provider
-                                
-                                if hasattr(actual_provider, 'add_span_processor'):
-                                    actual_provider.add_span_processor(falkordb_processor)
-                                    logger.info("FalkorDB exporter added to reused tracer provider")
-                                else:
-                                    error_msg = (
-                                        f"Cannot add span processor to provider type {type(actual_provider)}. "
-                                        "FalkorDB export will NOT work. This is a FATAL error."
-                                    )
-                                    logger.error(error_msg)
-                                    raise RuntimeError(error_msg)
-                            except Exception as e:
-                                # If we can't add the exporter, this is a FATAL error
-                                error_msg = f"Failed to add FalkorDB exporter to reused provider: {e}. This is a FATAL error."
-                                logger.error(error_msg, exc_info=True)
-                                raise RuntimeError(error_msg) from e
+                # Provider already exists and is suitable, reuse it
+                logger.debug("Reusing existing tracer provider")
+                self.tracer_provider = current_provider
+                self._provider_owned = False  # We didn't create it, so don't flush/shutdown
             else:
                 # No real provider, set ours
                 trace.set_tracer_provider(self.tracer_provider)
