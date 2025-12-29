@@ -159,15 +159,15 @@ class GraphRAGIndexer:
                         jitter = random.uniform(0, delay * 0.1)
                         total_delay = delay + jitter
                         
-                        logger.warning(
-                            f"{operation_name}: Rate limit detected in error message (attempt {attempt + 1}/{max_retries}). "
-                            f"Retrying in {total_delay:.2f}s..."
+                        logger.info(
+                            f"{operation_name}: Rate limit encountered (attempt {attempt + 1}/{max_retries}). "
+                            f"Retrying with exponential backoff in {total_delay:.2f}s..."
                         )
                         time.sleep(total_delay)
                         continue
                     else:
-                        logger.error(f"{operation_name}: Rate limit error after {max_retries} attempts")
-                        raise
+                        logger.error(f"{operation_name}: Rate limit exceeded after {max_retries} retry attempts", exc_info=True)
+                        raise RuntimeError(f"{operation_name}: Rate limit exceeded after {max_retries} retry attempts: {e}") from e
                 else:
                     # Not a rate limit error, re-raise immediately
                     logger.error(f"{operation_name}: API error: {e}")

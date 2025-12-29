@@ -236,10 +236,11 @@ class GameRunner:
                     # Don't print stack trace for rate limit errors
                     error_str = str(e).lower()
                     if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
-                        logger.warning(error_msg)
+                        logger.info(f"Rate limit encountered for agent {i}, will retry: {e}")
+                        raise RuntimeError(error_msg) from e
                     else:
                         logger.error(error_msg, exc_info=True)
-                    raise RuntimeError(error_msg) from e
+                        raise RuntimeError(error_msg) from e
             
             # Run all agents in parallel using ThreadPoolExecutor (or sequentially in debug mode)
             if self.debug:
@@ -256,10 +257,11 @@ class GameRunner:
                         # Don't print stack trace for rate limit errors
                         error_str = str(e).lower()
                         if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
-                            logger.warning(error_msg)
+                            logger.info(f"Rate limit encountered for agent {i}, will retry: {e}")
+                            raise RuntimeError(error_msg) from e
                         else:
                             logger.error(error_msg, exc_info=True)
-                        raise RuntimeError(error_msg) from e
+                            raise RuntimeError(error_msg) from e
             else:
                 # Parallel execution (normal mode)
                 with ThreadPoolExecutor(max_workers=self.config['n_players']) as executor:
@@ -281,10 +283,11 @@ class GameRunner:
                             # Don't print stack trace for rate limit errors
                             error_str = str(e).lower()
                             if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
-                                logger.warning(error_msg)
+                                logger.info(f"Rate limit encountered for agent {player_id}, will retry: {e}")
+                                raise RuntimeError(error_msg) from e
                             else:
                                 logger.error(error_msg, exc_info=True)
-                            raise RuntimeError(error_msg) from e
+                                raise RuntimeError(error_msg) from e
             
             # Process results in order
             for i in range(self.config['n_players']):

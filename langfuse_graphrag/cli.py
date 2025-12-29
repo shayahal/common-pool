@@ -154,6 +154,7 @@ def ingest_command(args):
         
     except Exception as e:
         logger.error(f"Error during ingestion: {e}", exc_info=True)
+        logger.error("FATAL: Ingestion failed. Exiting immediately.")
         sys.exit(1)
     finally:
         if 'neo4j_manager' in locals():
@@ -435,7 +436,14 @@ def main():
         parser.print_help()
         sys.exit(1)
     
-    args.func(args)
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        logger.error("Interrupted by user")
+        sys.exit(130)
+    except Exception as e:
+        logger.error(f"FATAL: Unhandled exception in CLI: {e}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
