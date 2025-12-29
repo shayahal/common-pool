@@ -61,7 +61,7 @@ class EntityExtractor:
             elif csv_type == "score":
                 self._extract_scores(type_records)
             else:
-                logger.warning(f"Unknown CSV type: {csv_type}, skipping entity extraction")
+                raise ValueError(f"Unknown CSV type: {csv_type}. Expected one of: session, trace, span, generation, score")
         
         # Log summary
         for entity_type, entities in self.entities.items():
@@ -154,9 +154,27 @@ class EntityExtractor:
         if trace_type not in self.entities:
             self.entities[trace_type] = []
         
+        # Use original ID if available (preserves hex string trace IDs)
+        # Otherwise fall back to normalized id
+        trace_id = record.get("_original_id") or record.get("id")
+        
+        # Validate that trace_id is different from session_id
+        if trace_id == session_id:
+            logger.warning(
+                f"Trace ID equals session ID ({trace_id}). "
+                f"Using original id from record. "
+                f"Record keys: {list(record.keys())[:10]}"
+            )
+            # Try to find the actual trace ID in the record
+            # Check if there's a different id field
+            for key in ["_original_id", "id", "trace_id", "traceId"]:
+                if key in record and record[key] and record[key] != session_id:
+                    trace_id = record[key]
+                    break
+        
         trace_entity = {
-            "id": record.get("id"),
-            "trace_id": record.get("id"),
+            "id": trace_id,
+            "trace_id": trace_id,
             "session_id": session_id,
             "name": record.get("name"),
             "timestamp": record.get("timestamp") or record.get("createdAt"),
@@ -166,7 +184,7 @@ class EntityExtractor:
             "user_id": record.get("userId") or record.get("user_id"),
         }
         
-        # Extract additional metrics from metadata
+        # Extract additional metrics from metadata (handle nested JSON)
         metadata = record.get("metadata")
         if metadata:
             if isinstance(metadata, str):
@@ -174,10 +192,54 @@ class EntityExtractor:
                     metadata = json.loads(metadata)
                 except json.JSONDecodeError:
                     metadata = {}
+            
+            # Handle nested JSON structure: {"attributes": "{\"game.id\":\"...\"}"}
             if isinstance(metadata, dict):
-                trace_entity["game_id"] = metadata.get("game_id")
-                trace_entity["player_id"] = metadata.get("player_id")
-                trace_entity["round"] = metadata.get("round")
+                # Check if attributes field contains JSON string
+                if "attributes" in metadata:
+                    attributes_str = metadata["attributes"]
+                    if isinstance(attributes_str, str):
+                        try:
+                            attributes = json.loads(attributes_str)
+                            # Extract from attributes
+                            trace_entity["game_id"] = attributes.get("game.id") or attributes.get("game_id") or metadata.get("game_id")
+                            trace_entity["player_id"] = attributes.get("player.id") or attributes.get("player_id") or metadata.get("player_id")
+                            round_val = attributes.get("round") or metadata.get("round")
+                            if round_val is not None:
+                                try:
+                                    trace_entity["round"] = int(round_val)
+                                except (ValueError, TypeError):
+                                    trace_entity["round"] = round_val
+                        except json.JSONDecodeError:
+                            # If attributes is not JSON, try direct metadata access
+                            trace_entity["game_id"] = metadata.get("game_id")
+                            trace_entity["player_id"] = metadata.get("player_id")
+                            round_val = metadata.get("round")
+                            if round_val is not None:
+                                try:
+                                    trace_entity["round"] = int(round_val)
+                                except (ValueError, TypeError):
+                                    trace_entity["round"] = round_val
+                    else:
+                        # attributes is already a dict
+                        trace_entity["game_id"] = attributes_str.get("game.id") or attributes_str.get("game_id") or metadata.get("game_id")
+                        trace_entity["player_id"] = attributes_str.get("player.id") or attributes_str.get("player_id") or metadata.get("player_id")
+                        round_val = attributes_str.get("round") or metadata.get("round")
+                        if round_val is not None:
+                            try:
+                                trace_entity["round"] = int(round_val)
+                            except (ValueError, TypeError):
+                                trace_entity["round"] = round_val
+                else:
+                    # Direct metadata access
+                    trace_entity["game_id"] = metadata.get("game_id")
+                    trace_entity["player_id"] = metadata.get("player_id")
+                    round_val = metadata.get("round")
+                    if round_val is not None:
+                        try:
+                            trace_entity["round"] = int(round_val)
+                        except (ValueError, TypeError):
+                            trace_entity["round"] = round_val
         
         self.entities[trace_type].append(trace_entity)
     
@@ -266,11 +328,11 @@ class EntityExtractor:
         # Check required properties
         for prop in schema.required_properties:
             if prop not in record or record[prop] is None:
-                logger.warning(
+                raise ValueError(
                     f"Missing required property '{prop}' for {entity_type} "
-                    f"(row {record.get('_row_index', 'unknown')})"
+                    f"(row {record.get('_row_index', 'unknown')}). "
+                    f"Available keys: {list(record.keys())[:10]}"
                 )
-                return None
         
         # Add all schema properties
         for prop, prop_type in schema.properties.items():
@@ -280,15 +342,17 @@ class EntityExtractor:
                 if prop_type == "integer" and value is not None:
                     try:
                         entity[prop] = int(value)
-                    except (ValueError, TypeError):
-                        logger.warning(f"Could not convert {prop} to integer: {value}")
-                        entity[prop] = value
+                    except (ValueError, TypeError) as e:
+                        raise TypeError(
+                            f"Cannot convert {prop}='{value}' to integer for {entity_type}"
+                        ) from e
                 elif prop_type == "float" and value is not None:
                     try:
                         entity[prop] = float(value)
-                    except (ValueError, TypeError):
-                        logger.warning(f"Could not convert {prop} to float: {value}")
-                        entity[prop] = value
+                    except (ValueError, TypeError) as e:
+                        raise TypeError(
+                            f"Cannot convert {prop}='{value}' to float for {entity_type}"
+                        ) from e
                 elif prop_type == "datetime" and value is not None:
                     if isinstance(value, datetime):
                         entity[prop] = value
@@ -310,6 +374,9 @@ class EntityExtractor:
         """
         logger.info("Extracting relationships from entities")
         
+        # Validate trace IDs before creating relationships
+        self._validate_trace_ids(entities)
+        
         self.relationships = []
         
         # Extract structural relationships
@@ -320,6 +387,39 @@ class EntityExtractor:
         
         logger.info(f"Extracted {len(self.relationships)} relationships")
         return self.relationships
+    
+    def _validate_trace_ids(self, entities: Dict[str, List[Dict[str, Any]]]) -> None:
+        """Validate trace IDs and log warnings for duplicates.
+        
+        Args:
+            entities: Dictionary of entity types to entity lists
+        """
+        traces = entities.get(EntityType.TRACE.value, [])
+        if not traces:
+            return
+        
+        trace_ids = [t.get("id") for t in traces if t.get("id")]
+        unique_ids = set(trace_ids)
+        
+        if len(trace_ids) != len(unique_ids):
+            from collections import Counter
+            duplicates = {k: v for k, v in Counter(trace_ids).items() if v > 1}
+            logger.warning(
+                f"Duplicate trace IDs detected: {len(duplicates)} unique IDs "
+                f"appear multiple times. Total traces: {len(trace_ids)}, "
+                f"Unique IDs: {len(unique_ids)}"
+            )
+            logger.debug(f"Sample duplicate IDs: {list(duplicates.items())[:10]}")
+            
+            # Log details for each duplicate
+            for dup_id, count in list(duplicates.items())[:5]:
+                dup_traces = [t for t in traces if t.get("id") == dup_id]
+                logger.debug(
+                    f"Trace ID '{dup_id}' appears {count} times. "
+                    f"Sample names: {[t.get('name') for t in dup_traces[:3]]}"
+                )
+        else:
+            logger.debug(f"All {len(trace_ids)} trace IDs are unique")
     
     def _extract_structural_relationships(
         self,
@@ -482,14 +582,23 @@ class EntityExtractor:
                 # Link all traces in the same round
                 for i, trace1 in enumerate(round_traces):
                     for trace2 in round_traces[i+1:]:
-                        self.relationships.append({
-                            "type": "SAME_ROUND",
-                            "from_type": EntityType.TRACE.value,
-                            "from_id": trace1.get("id"),
-                            "to_type": EntityType.TRACE.value,
-                            "to_id": trace2.get("id"),
-                            "properties": {"round": round_num, "game_id": game_id},
-                        })
+                        trace1_id = trace1.get("id")
+                        trace2_id = trace2.get("id")
+                        # Skip self-relationships
+                        if trace1_id and trace2_id and trace1_id != trace2_id:
+                            self.relationships.append({
+                                "type": "SAME_ROUND",
+                                "from_type": EntityType.TRACE.value,
+                                "from_id": trace1_id,
+                                "to_type": EntityType.TRACE.value,
+                                "to_id": trace2_id,
+                                "properties": {"round": round_num, "game_id": game_id},
+                            })
+                        elif trace1_id == trace2_id:
+                            logger.warning(
+                                f"Skipping self-relationship SAME_ROUND: "
+                                f"trace {trace1_id} (name: {trace1.get('name')})"
+                            )
             
             # Create NEXT_ROUND relationships
             sorted_rounds = sorted(rounds.keys())
@@ -509,18 +618,27 @@ class EntityExtractor:
                         key=lambda t: t.get("timestamp") or ""
                     )
                     
-                    self.relationships.append({
-                        "type": "NEXT_ROUND",
-                        "from_type": EntityType.TRACE.value,
-                        "from_id": current_traces[-1].get("id"),
-                        "to_type": EntityType.TRACE.value,
-                        "to_id": next_traces[0].get("id"),
-                        "properties": {
-                            "from_round": current_round,
-                            "to_round": next_round,
-                            "game_id": game_id
-                        },
-                    })
+                    from_id = current_traces[-1].get("id")
+                    to_id = next_traces[0].get("id")
+                    # Skip self-relationships
+                    if from_id and to_id and from_id != to_id:
+                        self.relationships.append({
+                            "type": "NEXT_ROUND",
+                            "from_type": EntityType.TRACE.value,
+                            "from_id": from_id,
+                            "to_type": EntityType.TRACE.value,
+                            "to_id": to_id,
+                            "properties": {
+                                "from_round": current_round,
+                                "to_round": next_round,
+                                "game_id": game_id
+                            },
+                        })
+                    elif from_id == to_id:
+                        logger.warning(
+                            f"Skipping self-relationship NEXT_ROUND: "
+                            f"trace {from_id} (round {current_round} -> {next_round})"
+                        )
 
     def _extract_temporal_relationships(
         self,

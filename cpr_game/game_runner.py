@@ -144,10 +144,8 @@ class GameRunner:
             # Check if it's a configuration error (missing API key, etc.) - allow game to continue
             error_str = str(e).lower()
             if "api_key" in error_str or "api key" in error_str or "missing" in error_str:
-                logger.warning(f"Failed to initialize OpenTelemetry: {e}. Continuing without tracing.")
-                # Create a mock/no-op logger instead of failing
-                from .logging_manager import MockLoggingManager
-                self.logger = MockLoggingManager(self.config)
+                logger.error(f"Failed to initialize OpenTelemetry: {e}. Cannot continue without tracing.", exc_info=True)
+                raise RuntimeError(f"Failed to initialize OpenTelemetry (missing API key): {e}") from e
             else:
                 logger.error(f"❌ ERROR: Failed to initialize OpenTelemetry: {e}")
                 raise

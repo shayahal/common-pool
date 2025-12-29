@@ -88,8 +88,10 @@ class GracefulOTLPExporter(SpanExporter):
                 f"To disable: set OTEL_ENABLED=false",
                 exc_info=True
             )
-            # Return failure but don't raise - allows application to continue
-            # But errors are ALWAYS logged at ERROR level
+            # NOTE: OpenTelemetry SpanExporter.export() interface requires returning SpanExportResult,
+            # NOT raising exceptions. However, we log ALL failures at ERROR level with full stack trace.
+            # The failure is NOT silent - it's logged and visible. The OTel SDK will handle the failure result.
+            # If you need to stop execution on export failures, check _failure_count or monitor ERROR logs.
             return SpanExportResult.FAILURE
     
     def shutdown(self):
@@ -97,24 +99,22 @@ class GracefulOTLPExporter(SpanExporter):
         try:
             self.exporter.shutdown()
         except Exception as e:
-            # Log shutdown errors - never fail silently
             logger.error(
                 f"Error shutting down OpenTelemetry exporter for {self.endpoint}: {e}",
                 exc_info=True
             )
-            raise
+            raise RuntimeError(f"Failed to shutdown OpenTelemetry exporter: {e}") from e
     
     def force_flush(self, timeout_millis: int = 30000):
         """Force flush the underlying exporter."""
         try:
             return self.exporter.force_flush(timeout_millis)
         except Exception as e:
-            # Log flush errors - never fail silently
             logger.error(
                 f"Error flushing OpenTelemetry exporter for {self.endpoint}: {e}",
                 exc_info=True
             )
-            raise
+            raise RuntimeError(f"Failed to flush OpenTelemetry exporter: {e}") from e
 
 
 class OTelManager:
@@ -164,8 +164,8 @@ class OTelManager:
                         f"Start with: 'docker-compose up -d otel-collector'"
                     )
             except Exception as e:
-                # Don't fail initialization if docker check fails
-                logger.debug(f"Could not check if OTel collector is running: {e}")
+                logger.error(f"Could not check if OTel collector is running: {e}", exc_info=True)
+                raise RuntimeError(f"Failed to check OTel collector status: {e}") from e
         
         # Check Langfuse API keys if Langfuse is expected
         otel_receiver = self.config.get("otel_receiver", os.getenv("OTEL_RECEIVER", "both")).lower()
@@ -270,13 +270,8 @@ class OTelManager:
                 trace.set_tracer_provider(self.tracer_provider)
                 logger.debug("Set new tracer provider as global")
             except Exception as e:
-                # If setting fails (e.g., provider already set), just reuse existing
-                logger.warning(f"Failed to set tracer provider, reusing existing: {e}")
-                try:
-                    self.tracer_provider = trace.get_tracer_provider()
-                    self._provider_owned = False
-                    reuse_provider = True  # Update flag since we're now reusing
-                except Exception as final_error:
+                logger.error(f"Failed to set tracer provider: {e}", exc_info=True)
+                raise RuntimeError(f"Failed to set tracer provider: {e}") from e
                     logger.error(f"Failed to get existing tracer provider: {final_error}", exc_info=True)
                     raise
         
@@ -303,8 +298,8 @@ class OTelManager:
                         )
                         self._span_processor = None
                 except Exception as e:
-                    logger.warning(f"Failed to get actual provider from ProxyTracerProvider: {e}")
-                    self._span_processor = None
+                    logger.error(f"Failed to get actual provider from ProxyTracerProvider: {e}", exc_info=True)
+                    raise RuntimeError(f"Failed to get actual provider from ProxyTracerProvider: {e}") from e
             else:
                 logger.error(
                     f"Tracer provider is not SDK provider (type: {type(self.tracer_provider).__name__}), "
@@ -367,7 +362,8 @@ class OTelManager:
                     self._span_processor.force_flush(timeout_millis=5000)
                     logger.debug("Flushed spans via span processor")
                 except Exception as e:
-                    logger.debug(f"Span processor flush failed: {e}")
+                    logger.error(f"Span processor flush failed: {e}", exc_info=True)
+                    raise RuntimeError(f"Failed to flush span processor: {e}") from e
             
             # Also try provider flush if we own it
             if self.tracer_provider and self._provider_owned:
@@ -380,7 +376,8 @@ class OTelManager:
                     # Provider doesn't have force_flush - that's okay
                     logger.debug("Tracer provider doesn't support force_flush")
                 except Exception as e:
-                    logger.debug(f"Tracer provider flush failed: {e}")
+                    logger.error(f"Tracer provider flush failed: {e}", exc_info=True)
+                    raise RuntimeError(f"Failed to flush tracer provider: {e}") from e
             
             # If provider is a ProxyTracerProvider, try to get the actual SDK provider
             from opentelemetry.trace import ProxyTracerProvider
@@ -395,9 +392,11 @@ class OTelManager:
                                 processor.force_flush(timeout_millis=5000)
                                 logger.debug("Flushed spans via processor from ProxyTracerProvider")
                             except Exception as e:
-                                logger.debug(f"Processor flush failed: {e}")
+                                logger.error(f"Processor flush failed: {e}", exc_info=True)
+                                raise RuntimeError(f"Failed to flush processor from ProxyTracerProvider: {e}") from e
                 except Exception as e:
-                    logger.debug(f"Failed to flush via ProxyTracerProvider: {e}")
+                    logger.error(f"Failed to flush via ProxyTracerProvider: {e}", exc_info=True)
+                    raise RuntimeError(f"Failed to flush via ProxyTracerProvider: {e}") from e
             
             # If provider is reused, try to get the SDK provider and flush its processors
             if self.tracer_provider and not self._provider_owned:
@@ -410,10 +409,11 @@ class OTelManager:
                                 processor.force_flush(timeout_millis=5000)
                         logger.debug("Flushed spans via SDK tracer provider processors")
                 except Exception as e:
-                    logger.debug(f"Failed to flush via SDK provider: {e}")
+                    logger.error(f"Failed to flush via SDK provider: {e}", exc_info=True)
+                    raise RuntimeError(f"Failed to flush via SDK provider: {e}") from e
         except Exception as e:
-            # Log warning but don't raise - flushing is best effort
-            logger.warning(f"Error flushing OTel spans: {e}")
+            logger.error(f"Error flushing OTel spans: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to flush OTel spans: {e}") from e
     
     def shutdown(self):
         """Shutdown tracer provider."""
@@ -429,8 +429,8 @@ class OTelManager:
                 # Provider doesn't have shutdown - that's okay
                 logger.debug("Tracer provider doesn't support shutdown")
             except Exception as e:
-                # Log warning but don't raise - shutdown is best effort
-                logger.warning(f"Error shutting down OTel tracer provider: {e}")
+                logger.error(f"Error shutting down OTel tracer provider: {e}", exc_info=True)
+                raise RuntimeError(f"Failed to shutdown OTel tracer provider: {e}") from e
     
     def __del__(self):
         """Cleanup on deletion."""

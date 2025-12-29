@@ -71,7 +71,7 @@ class QueryInterface:
         
         if not query_embedding:
             logger.error("Failed to generate query embedding")
-            return []
+            raise RuntimeError("Failed to generate query embedding for semantic search")
         
         # Vector similarity search query
         # Note: Neo4j vector search syntax may vary by version
@@ -110,9 +110,7 @@ class QueryInterface:
             
         except Exception as e:
             logger.error(f"Error in semantic search: {e}", exc_info=True)
-            # Fallback to simpler query if vector search fails
-            logger.warning("Attempting fallback query without vector search")
-            return []
+            raise RuntimeError(f"Semantic search failed: {e}") from e
     
     def pattern_analysis(
         self,
@@ -176,7 +174,7 @@ class QueryInterface:
         query = queries.get(pattern_type)
         if not query:
             logger.error(f"Unknown pattern type: {pattern_type}")
-            return []
+            raise ValueError(f"Unknown pattern type: {pattern_type}")
         
         try:
             results = self.neo4j_manager.execute_query(query, {"limit": limit})
@@ -184,7 +182,7 @@ class QueryInterface:
             return results
         except Exception as e:
             logger.error(f"Error in pattern analysis: {e}", exc_info=True)
-            return []
+            raise RuntimeError(f"Failed to perform pattern analysis: {e}") from e
     
     def error_analysis(
         self,
@@ -250,7 +248,7 @@ class QueryInterface:
             return results
         except Exception as e:
             logger.error(f"Error in error analysis: {e}", exc_info=True)
-            return []
+            raise RuntimeError(f"Failed to perform error analysis: {e}") from e
     
     def performance_analysis(
         self,
@@ -317,7 +315,7 @@ class QueryInterface:
             return results
         except Exception as e:
             logger.error(f"Error in performance analysis: {e}", exc_info=True)
-            return []
+            raise RuntimeError(f"Failed to perform performance analysis: {e}") from e
     
     def find_similar_traces(
         self,
@@ -368,8 +366,8 @@ class QueryInterface:
             )
             
             if not embedding_results or not embedding_results[0].get("embedding"):
-                logger.warning(f"No embeddings found for trace: {trace_id}")
-                return []
+                logger.error(f"No embeddings found for trace: {trace_id}")
+                raise RuntimeError(f"No embeddings found for trace: {trace_id}")
             
             trace_embedding = embedding_results[0]["embedding"]
             
@@ -412,7 +410,7 @@ class QueryInterface:
             
         except Exception as e:
             logger.error(f"Error finding similar traces: {e}", exc_info=True)
-            return []
+            raise RuntimeError(f"Failed to find similar traces: {e}") from e
     
     def execute_custom_query(
         self,

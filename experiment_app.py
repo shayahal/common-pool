@@ -336,7 +336,8 @@ def _show_experiment_definition(db_manager: DatabaseManager):
                 try:
                     write_db_manager.close()
                 except Exception as e:
-                    logger.warning(f"Error closing write connection: {e}")
+                    logger.error(f"Error closing write connection: {e}", exc_info=True)
+                    raise RuntimeError(f"Failed to close write connection: {e}") from e
                 time.sleep(0.1)  # Give database time to release lock
             
             # Recreate read-only connection for queries

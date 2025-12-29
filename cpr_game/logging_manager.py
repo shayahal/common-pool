@@ -67,9 +67,8 @@ class LoggingManager:
             # Check if it's a configuration error (missing API key, etc.) - don't print stack trace
             error_str = str(e).lower()
             if "api_key" in error_str or "api key" in error_str or "missing" in error_str:
-                logger.warning(f"Failed to initialize OpenTelemetry: {e}. Tracing will be disabled.")
-                self.otel_manager = None
-                self.tracer = None
+                logger.error(f"Failed to initialize OpenTelemetry: {e}. Cannot continue without tracing.", exc_info=True)
+                raise RuntimeError(f"Failed to initialize OpenTelemetry (missing API key): {e}") from e
             else:
                 # For unexpected errors, log with stack trace
                 logger.error(f"Failed to initialize OpenTelemetry: {e}", exc_info=True)
@@ -373,10 +372,18 @@ class LoggingManager:
                     stack_trace=None
                 )
             except Exception as log_error:
-                logger.warning(f"Failed to log error: {log_error}")
+                logger.error(f"Failed to log error: {log_error}", exc_info=True)
+                raise RuntimeError(f"Failed to log error during exception handling: {log_error}") from log_error
             
             # Still store data for dashboard/metrics before raising
-            self._store_generation_data(player_id, prompt, response, action, reasoning, api_metrics)
+            try:
+                self._store_generation_data(player_id, prompt, response, action, reasoning, api_metrics)
+            except Exception as store_error:
+                logger.error(f"Failed to store generation data: {store_error}", exc_info=True)
+                raise RuntimeError(f"Failed to store generation data: {store_error}") from store_error
+            
+            # Now raise the original error
+            raise RuntimeError(error_msg) from e
             raise RuntimeError(error_msg) from e
 
     def _store_generation_data(
@@ -500,6 +507,7 @@ class LoggingManager:
             error_msg = f"Error logging round metrics: {e}"
             logger.error(error_msg, exc_info=True)
             raise RuntimeError(error_msg) from e
+            raise RuntimeError(error_msg) from e
 
     def end_game_trace(self, summary: Dict):
         """Finalize game thread and flush traces.
@@ -547,9 +555,9 @@ class LoggingManager:
 
         except Exception as e:
             error_msg = f"Error ending game thread: {e}"
-            # Don't raise - just log warning and continue
-            # This allows games to complete even if tracing has issues
-            logger.warning(error_msg)
+            logger.error(error_msg, exc_info=True)
+            raise RuntimeError(error_msg) from e
+            raise RuntimeError(f"Failed to log generation: {error_msg}") from e
 
     def get_round_metrics(self) -> List[Dict]:
         """Get all collected round metrics.
@@ -632,7 +640,8 @@ class LoggingManager:
             ) as session_span:
                 session_span.add_event("session.started")
         except Exception as e:
-            logger.warning(f"Error logging session start: {e}")
+            logger.error(f"Error logging session start: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to log session start: {e}") from e
     
     def log_score(
         self,
@@ -675,7 +684,8 @@ class LoggingManager:
             if current_span:
                 current_span.add_event("score.recorded", score_attributes)
         except Exception as e:
-            logger.warning(f"Error logging score: {e}")
+            logger.error(f"Error logging score: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to log score: {e}") from e
     
     def log_error(
         self,
@@ -725,7 +735,8 @@ class LoggingManager:
                 current_span.set_status(trace.Status(trace.StatusCode.ERROR, message))
                 current_span.add_event("error.occurred", error_attributes)
         except Exception as e:
-            logger.warning(f"Error logging error: {e}")
+            logger.error(f"Error logging error: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to log error: {e}") from e
 
     def reset(self):
         """Reset manager state for new game."""

@@ -229,8 +229,8 @@ def process_experiment(
                 db_manager.update_experiment_status(experiment_id, "pending")
                 db_manager.close()
             except Exception as reset_error:
-                logger.warning(f"{worker_prefix} Failed to reset experiment {experiment_id} to pending: {reset_error}")
-            return False
+                logger.error(f"{worker_prefix} Failed to reset experiment {experiment_id} to pending: {reset_error}", exc_info=True)
+                raise RuntimeError(f"Failed to reset experiment {experiment_id} to pending: {reset_error}") from reset_error
         
         # Now run the experiment (run_experiment will update status to 'completed' or 'failed' at the end)
         # Note: run_experiment also tries to update status to 'running', but since we've already claimed it,

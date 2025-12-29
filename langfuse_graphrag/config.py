@@ -24,7 +24,8 @@ NEO4J_DATABASE: str = os.getenv("NEO4J_DATABASE", "neo4j")
 # ============================================================================
 
 # LLM Model for GraphRAG entity extraction and summarization
-GRAPHRAG_LLM_MODEL: str = os.getenv("GRAPHRAG_LLM_MODEL", "gpt-4o-mini")
+# Using gpt-3.5-turbo for faster and cheaper processing
+GRAPHRAG_LLM_MODEL: str = os.getenv("GRAPHRAG_LLM_MODEL", "gpt-3.5-turbo")
 GRAPHRAG_LLM_TEMPERATURE: float = float(os.getenv("GRAPHRAG_LLM_TEMPERATURE", "0.0"))
 GRAPHRAG_LLM_MAX_TOKENS: int = int(os.getenv("GRAPHRAG_LLM_MAX_TOKENS", "4000"))
 
@@ -39,6 +40,7 @@ OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 GRAPHRAG_BATCH_SIZE: int = int(os.getenv("GRAPHRAG_BATCH_SIZE", "100"))
 GRAPHRAG_CHUNK_SIZE: int = int(os.getenv("GRAPHRAG_CHUNK_SIZE", "1000"))
 GRAPHRAG_CHUNK_OVERLAP: int = int(os.getenv("GRAPHRAG_CHUNK_OVERLAP", "200"))
+GRAPHRAG_MAX_WORKERS: int = int(os.getenv("GRAPHRAG_MAX_WORKERS", "10"))  # Parallel processing workers
 
 # Community Detection Settings
 COMMUNITY_MIN_SIZE: int = int(os.getenv("COMMUNITY_MIN_SIZE", "3"))
@@ -100,6 +102,7 @@ CONFIG: Dict = {
     "graphrag_batch_size": GRAPHRAG_BATCH_SIZE,
     "graphrag_chunk_size": GRAPHRAG_CHUNK_SIZE,
     "graphrag_chunk_overlap": GRAPHRAG_CHUNK_OVERLAP,
+    "graphrag_max_workers": GRAPHRAG_MAX_WORKERS,
     "community_min_size": COMMUNITY_MIN_SIZE,
     "community_max_levels": COMMUNITY_MAX_LEVELS,
     "neo4j_batch_size": NEO4J_BATCH_SIZE,

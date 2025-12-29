@@ -52,7 +52,7 @@ def migrate_duckdb_to_sqlite(duckdb_path: str, sqlite_path: str, dry_run: bool =
         print("✅ Connected to DuckDB (read-only)")
     except Exception as e:
         print(f"❌ Failed to connect to DuckDB: {e}")
-        return False
+        raise RuntimeError(f"Failed to connect to DuckDB: {e}") from e
     
     # Initialize SQLite database manager
     try:
@@ -63,8 +63,9 @@ def migrate_duckdb_to_sqlite(duckdb_path: str, sqlite_path: str, dry_run: bool =
         print("✅ Connected to SQLite database")
     except Exception as e:
         print(f"❌ Failed to initialize SQLite database: {e}")
-        duckdb_conn.close()
-        return False
+        if 'duckdb_conn' in locals():
+            duckdb_conn.close()
+        raise RuntimeError(f"Failed to initialize SQLite database: {e}") from e
     
     migrated_count = {
         'experiments': 0,
@@ -99,8 +100,8 @@ def migrate_duckdb_to_sqlite(duckdb_path: str, sqlite_path: str, dry_run: bool =
                             for p in players_data
                         ]
                     except Exception as e:
-                        logger.warning(f"Could not load players for {experiment_id}: {e}")
-                        players = []
+                        logger.error(f"Could not load players for {experiment_id}: {e}", exc_info=True)
+                        raise RuntimeError(f"Failed to load players for experiment {experiment_id}: {e}") from e
                     
                     # Extract parameters
                     parameters = {
@@ -219,7 +220,8 @@ def migrate_duckdb_to_sqlite(duckdb_path: str, sqlite_path: str, dry_run: bool =
                             ))
                             migrated_count['game_results'] += 1
                         except Exception as e:
-                            logger.warning(f"Error migrating game_result: {e}")
+                            logger.error(f"Error migrating game_result: {e}", exc_info=True)
+                            raise RuntimeError(f"Failed to migrate game_result: {e}") from e
                     conn.commit()
         except Exception as e:
             print(f"   ⚠️  Error migrating game_results: {e}")

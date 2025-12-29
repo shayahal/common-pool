@@ -28,15 +28,15 @@
    - Important state changes that users should know about
 
 3. **WARNING** - Use for:
-   - Unexpected or undesired behavior
-   - Recoverable errors or fallback scenarios
-   - Configuration issues or missing optional features
-   - Anything that might indicate a problem but doesn't stop execution
+   - Unexpected or undesired behavior that was EXPLICITLY REQUESTED to be non-fatal
+   - Configuration issues or missing OPTIONAL features (only if user asked for graceful degradation)
+   - **NOTE**: Most "warnings" should actually be errors! When in doubt, use ERROR and raise.
 
 4. **ERROR** - Use for:
    - Actual errors that prevent normal operation
    - Exceptions and failures
    - Critical issues that require attention
+   - **ANY operation that fails, even if you think it might be recoverable**
 
 ### Logging Configuration
 
@@ -85,16 +85,41 @@ logger.error(f"API call failed: {error}")
 
 ## Error Handling Rules
 
-### Never Implement Silent Errors or Warnings
+### ⚠️⚠️⚠️ CRITICAL: ABSOLUTE ZERO TOLERANCE FOR SILENT FAILURES ⚠️⚠️⚠️
 
-- **NEVER EVER** implement silent errors or warnings, unless the user explicitly asked to suppress this specific error
-- **NEVER** use `try-except` blocks without reraising the exception
-- **NEVER** simply print or log an error and then `pass` or continue silently
-- **ALWAYS** propagate errors unless you have a specific, intentional reason to handle them
-- If you catch an exception, you must either:
-  1. Reraise it (using `raise` or `raise ... from ...`)
-  2. Transform it into a more appropriate exception and raise that
-  3. Handle it completely and intentionally (only if the user explicitly requested this behavior)
+**THIS IS THE #1 RULE. THE HIGHEST PRIORITY. VIOLATIONS ARE COMPLETELY UNACCEPTABLE.**
+
+**NEVER. EVER. UNDER ANY CIRCUMSTANCES. ALLOW ANY FAILURE TO BE SILENT.**
+
+- **NEVER EVER EVER** implement silent errors or warnings
+- **NEVER EVER** use `try-except` blocks without reraising the exception
+- **NEVER EVER** simply print or log an error and then `pass`, `continue`, or `return` silently
+- **NEVER EVER** use `logger.warning()` or `logger.info()` or `logger.debug()` as an excuse to continue after a failure
+- **NEVER EVER** return `None`, `[]`, `{}`, or any default value after catching an exception
+- **ALWAYS ALWAYS ALWAYS** propagate errors by raising exceptions
+- **ALWAYS** log at ERROR level with `exc_info=True` before raising
+- If you catch an exception, you MUST:
+  1. Log it at ERROR level with `exc_info=True`
+  2. Raise it (using `raise` or `raise RuntimeError(...) from e`)
+  3. **THERE IS NO EXCEPTION TO THIS RULE** (except for interface contracts like OpenTelemetry SpanExporter.export() which must return a result - but even then, log at ERROR)
+
+**THE ONLY ACCEPTABLE PATTERN:**
+```python
+try:
+    operation()
+except Exception as e:
+    logger.error(f"Operation failed: {e}", exc_info=True)
+    raise RuntimeError(f"Operation failed: {e}") from e
+```
+
+### Common Anti-Patterns to NEVER Use
+
+1. **Database/schema creation failures** - ALWAYS raise, never warn and continue
+2. **Index creation failures** - ALWAYS raise, never warn and continue  
+3. **API call failures** - ALWAYS raise, never warn and continue
+4. **JSON parsing failures** - ALWAYS raise, never warn and continue
+5. **File operations** - ALWAYS raise, never warn and continue
+6. **Connection failures** - ALWAYS raise, never warn and continue
 
 ### Examples of FORBIDDEN Patterns
 
@@ -118,6 +143,20 @@ try:
 except Exception:
     logger.warning("Operation failed, continuing...")  # Silent warning
     continue  # NEVER DO THIS without explicit user request
+
+# ❌ FORBIDDEN: Warning as excuse to continue
+try:
+    create_database_index()
+except Exception as e:
+    logger.warning(f"Could not create index: {e}")  # WRONG!
+    # Code continues... WRONG!
+
+# ❌ FORBIDDEN: Fallback without raising
+try:
+    parse_json_response()
+except json.JSONDecodeError:
+    logger.warning("Failed to parse JSON")
+    return default_value  # WRONG! Should raise!
 ```
 
 ### Examples of CORRECT Patterns
@@ -135,6 +174,13 @@ try:
 except ValueError as e:
     raise CustomError("Operation failed") from e
 
+# ✅ CORRECT: Log then raise
+try:
+    create_database_index()
+except Exception as e:
+    logger.error(f"Failed to create index: {e}", exc_info=True)
+    raise RuntimeError("Index creation failed") from e
+
 # ✅ CORRECT: Handle completely (only if user explicitly requested)
 try:
     optional_operation()
@@ -143,4 +189,25 @@ except Exception as e:
     # Only acceptable if user explicitly asked to suppress this error
     return default_value
 ```
+
+## langfuse_graphrag Module Rules
+
+The `langfuse_graphrag/` module follows the same rules as the main codebase:
+
+### Logging
+- Use `logging.getLogger(__name__)` for module-level loggers
+- The CLI (`langfuse_graphrag/cli.py`) sets up file handlers for logs/
+- Third-party loggers (httpx, openai, neo4j) are suppressed to WARNING level
+
+### Error Handling  
+- **ALL** Neo4j operations MUST raise on failure (no silent index creation failures!)
+- **ALL** OpenAI API calls MUST raise on failure
+- **ALL** JSON parsing MUST raise on failure
+- If a feature requires a specific Neo4j version, the code MUST fail clearly with an error message, not silently degrade
+- Use `skip_vector_indexes=True` config option if user wants to explicitly skip vector indexes
+
+### Config Options for Graceful Degradation
+If the user explicitly requests graceful degradation, add a config option:
+- `skip_vector_indexes: bool` - Skip vector index creation if Neo4j doesn't support it
+- These options MUST be explicitly set by the user, not auto-detected silently
 

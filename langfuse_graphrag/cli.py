@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import sys
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -18,12 +19,76 @@ from langfuse_graphrag.embeddings import EmbeddingGenerator
 from langfuse_graphrag.graphrag_indexer import GraphRAGIndexer
 from langfuse_graphrag.query_interface import QueryInterface
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(levelname)s - %(name)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+
+def setup_logging() -> logging.Logger:
+    """Configure logging with file handlers and console output.
+    
+    Creates log files in logs/ directory with different levels:
+    - logs/debug.log - DEBUG and above
+    - logs/info.log - INFO and above  
+    - logs/warning.log - WARNING and above
+    - logs/error.log - ERROR and above
+    
+    Returns:
+        Logger instance for the CLI module
+    """
+    # Create logs directory if it doesn't exist
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    
+    # Clear any existing handlers
+    root_logger.handlers.clear()
+    
+    # Create formatters
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_formatter = logging.Formatter('%(levelname)s - %(name)s - %(message)s')
+    
+    # Create file handlers for each log level
+    log_levels = [
+        ('debug.log', logging.DEBUG),
+        ('info.log', logging.INFO),
+        ('warning.log', logging.WARNING),
+        ('error.log', logging.ERROR),
+    ]
+    
+    for filename, level in log_levels:
+        handler = logging.FileHandler(logs_dir / filename, encoding='utf-8')
+        handler.setLevel(level)
+        handler.setFormatter(file_formatter)
+        root_logger.addHandler(handler)
+    
+    # Create console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_level = os.environ.get('STDOUT_LOG_LEVEL', 'INFO').upper()
+    console_handler.setLevel(getattr(logging, console_level, logging.INFO))
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
+    
+    # Suppress verbose third-party library logging
+    # These should be at WARNING level to avoid spamming INFO logs
+    noisy_loggers = [
+        'httpx',
+        'httpcore',
+        'urllib3',
+        'requests',
+        'openai',
+        'neo4j',
+    ]
+    for logger_name in noisy_loggers:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+    
+    return logging.getLogger(__name__)
+
+
+# Setup logging at module load
+logger = setup_logging()
 
 
 def ingest_command(args):

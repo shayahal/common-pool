@@ -43,3 +43,4 @@ tqdm>=4.65.0
 # GraphRAG (Langfuse GraphRAG side project)
 graphrag>=0.1.0  # Microsoft GraphRAG library
 neo4j>=5.11.0  # Neo4j Python driver with vector support
+scikit-learn>=1.3.0  # For hierarchical clustering (AgglomerativeClustering)

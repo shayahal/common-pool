@@ -13,10 +13,11 @@ def mock_config():
         "data_dir": "data/graphrag",
         "processed_data_dir": "data/graphrag/processed",
         "indices_dir": "data/graphrag/indices",
-        "graphrag_llm_model": "gpt-4o-mini",
+        "graphrag_llm_model": "gpt-3.5-turbo",
         "graphrag_batch_size": 100,
         "graphrag_chunk_size": 1000,
         "graphrag_chunk_overlap": 200,
+        "graphrag_max_workers": 5,
         "neo4j_uri": "bolt://localhost:7687",
         "neo4j_user": "neo4j",
         "neo4j_password": "password",
@@ -71,11 +72,45 @@ class TestGraphRAGIndexer:
         
         assert isinstance(texts, list)
         assert len(texts) > 0
+        # Should return dicts with text, type, prefix, hash
+        assert all(isinstance(t, dict) for t in texts)
+        assert all("text" in t for t in texts)
+        assert all("type" in t for t in texts)
+        assert all("prefix" in t for t in texts)
+        assert all("hash" in t for t in texts)
+    
+    @patch('langfuse_graphrag.graphrag_indexer.Neo4jManager')
+    @patch('langfuse_graphrag.graphrag_indexer.EmbeddingGenerator')
+    def test_extract_text_from_entities_deduplication(self, mock_emb, mock_neo4j, mock_config):
+        """Test that extract_text_from_entities deduplicates identical texts."""
+        mock_neo4j.return_value = MagicMock()
+        mock_emb.return_value = MagicMock()
+        
+        indexer = GraphRAGIndexer(mock_config)
+        entities = {
+            "Generation": [
+                {"id": "gen1", "prompt": "same prompt", "response": "same response"},
+                {"id": "gen2", "prompt": "same prompt", "response": "different response"},
+                {"id": "gen3", "prompt": "same prompt", "response": "same response"},
+            ],
+        }
+        
+        texts = indexer.extract_text_from_entities(entities)
+        
+        # Should deduplicate - "same prompt" appears 3 times but should only be in texts once
+        prompt_texts = [t for t in texts if t.get("type") == "prompt"]
+        assert len(prompt_texts) == 1
+        assert prompt_texts[0]["text"] == "same prompt"
+        
+        # "same response" appears twice but should only be once
+        response_texts = [t for t in texts if t.get("type") == "response" and t["text"] == "same response"]
+        assert len(response_texts) == 1
     
     @patch('langfuse_graphrag.graphrag_indexer.Neo4jManager')
     @patch('langfuse_graphrag.graphrag_indexer.EmbeddingGenerator')
     def test_chunk_texts(self, mock_emb, mock_neo4j, mock_config):
         """Test chunking texts."""
+        import hashlib
         mock_neo4j.return_value = MagicMock()
         mock_emb.return_value = MagicMock()
         
@@ -84,14 +119,73 @@ class TestGraphRAGIndexer:
         mock_config["graphrag_chunk_overlap"] = 100
         
         indexer = GraphRAGIndexer(mock_config)
-        # Use text that will be chunked but not cause infinite loop
-        texts = ["short text", "a" * 800]  # One short, one that will be chunked
+        # Use text dicts that will be chunked
+        texts = [
+            {"text": "short text", "type": "prompt", "prefix": "Prompt: ", "hash": hashlib.md5("short text".encode()).hexdigest()},
+            {"text": "a" * 800, "type": "response", "prefix": "Response: ", "hash": hashlib.md5(("a" * 800).encode()).hexdigest()},
+        ]
         
         chunks = indexer.chunk_texts(texts)
         
         assert isinstance(chunks, list)
         assert len(chunks) > 0
         assert all("text" in chunk for chunk in chunks)
+        assert all("hash" in chunk for chunk in chunks)
+        assert all("type" in chunk for chunk in chunks)
+    
+    @patch('langfuse_graphrag.graphrag_indexer.Neo4jManager')
+    @patch('langfuse_graphrag.graphrag_indexer.EmbeddingGenerator')
+    def test_chunk_texts_deduplication(self, mock_emb, mock_neo4j, mock_config):
+        """Test that chunk_texts deduplicates identical chunks."""
+        import hashlib
+        mock_neo4j.return_value = MagicMock()
+        mock_emb.return_value = MagicMock()
+        
+        mock_config["graphrag_chunk_size"] = 100
+        
+        indexer = GraphRAGIndexer(mock_config)
+        # Same text appears twice
+        same_text = "This is a test text that will be chunked"
+        texts = [
+            {"text": same_text, "type": "prompt", "prefix": "Prompt: ", "hash": hashlib.md5(same_text.encode()).hexdigest()},
+            {"text": same_text, "type": "response", "prefix": "Response: ", "hash": hashlib.md5(same_text.encode()).hexdigest()},
+        ]
+        
+        chunks = indexer.chunk_texts(texts)
+        
+        # Should create chunks with different prefixes but same underlying text
+        # Since prefixes differ, chunks will differ, but if we had same prefix+text, it would deduplicate
+        assert len(chunks) >= 1
+    
+    @patch('langfuse_graphrag.graphrag_indexer.Neo4jManager')
+    @patch('langfuse_graphrag.graphrag_indexer.EmbeddingGenerator')
+    def test_chunk_texts_semantic_boundaries(self, mock_emb, mock_neo4j, mock_config):
+        """Test that chunking respects semantic boundaries."""
+        import hashlib
+        mock_neo4j.return_value = MagicMock()
+        mock_emb.return_value = MagicMock()
+        
+        mock_config["graphrag_chunk_size"] = 200
+        
+        indexer = GraphRAGIndexer(mock_config)
+        # Text with paragraph boundaries
+        text_with_paragraphs = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
+        text_dict = {
+            "text": text_with_paragraphs,
+            "type": "prompt",
+            "prefix": "Prompt: ",
+            "hash": hashlib.md5(text_with_paragraphs.encode()).hexdigest(),
+        }
+        
+        chunks = indexer.chunk_texts([text_dict])
+        
+        # Should chunk at paragraph boundaries
+        assert len(chunks) > 0
+        # Verify chunks contain complete paragraphs
+        for chunk in chunks:
+            chunk_text = chunk["text"]
+            # Should not split in the middle of "paragraph"
+            assert "paragraph" in chunk_text or "Paragraph" in chunk_text
     
     @patch('langfuse_graphrag.graphrag_indexer.Neo4jManager')
     @patch('langfuse_graphrag.graphrag_indexer.EmbeddingGenerator')
@@ -111,7 +205,7 @@ class TestGraphRAGIndexer:
         
         indexer = GraphRAGIndexer(mock_config)
         chunks = [
-            {"id": "chunk1", "text": "This is about error handling and API calls"},
+            {"id": "chunk1", "text": "This is about error handling and API calls", "hash": "test_hash_1"},
         ]
         
         entities = indexer.extract_semantic_entities(chunks)
@@ -146,7 +240,7 @@ class TestGraphRAGIndexer:
         mock_openai.return_value = MagicMock()
         
         indexer = GraphRAGIndexer(mock_config)
-        chunks = [{"id": "chunk1", "text": "short"}]
+        chunks = [{"id": "chunk1", "text": "short", "hash": "test_hash_2"}]
         
         entities = indexer.extract_semantic_entities(chunks)
         
@@ -169,7 +263,7 @@ class TestGraphRAGIndexer:
         mock_openai.return_value.chat.completions.create.return_value = mock_response
         
         indexer = GraphRAGIndexer(mock_config)
-        chunks = [{"id": "chunk1", "text": "This is a longer text that should be processed"}]
+        chunks = [{"id": "chunk1", "text": "This is a longer text that should be processed", "hash": "test_hash_3"}]
         
         entities = indexer.extract_semantic_entities(chunks)
         
@@ -188,7 +282,7 @@ class TestGraphRAGIndexer:
         mock_openai.return_value.chat.completions.create.side_effect = Exception("API Error")
         
         indexer = GraphRAGIndexer(mock_config)
-        chunks = [{"id": "chunk1", "text": "This is a longer text that should be processed"}]
+        chunks = [{"id": "chunk1", "text": "This is a longer text that should be processed", "hash": "test_hash_4"}]
         
         entities = indexer.extract_semantic_entities(chunks)
         
@@ -212,7 +306,7 @@ class TestGraphRAGIndexer:
         mock_openai.return_value.chat.completions.create.return_value = mock_response
         
         indexer = GraphRAGIndexer(mock_config)
-        chunks = [{"id": "chunk1", "text": "This is about error handling"}]
+        chunks = [{"id": "chunk1", "text": "This is about error handling", "hash": "test_hash_5"}]
         
         entities = indexer.extract_semantic_entities(chunks)
         
@@ -220,6 +314,36 @@ class TestGraphRAGIndexer:
         assert len(entities) == 1
         assert entities[0]["name"] == "error handling"
         assert "first" in entities[0]["description"].lower() or "second" in entities[0]["description"].lower()
+    
+    @patch('langfuse_graphrag.graphrag_indexer.Neo4jManager')
+    @patch('langfuse_graphrag.graphrag_indexer.EmbeddingGenerator')
+    @patch('langfuse_graphrag.graphrag_indexer.OpenAI')
+    def test_extract_semantic_entities_caching(self, mock_openai, mock_emb, mock_neo4j, mock_config):
+        """Test that extract_semantic_entities caches LLM responses for identical chunks."""
+        mock_neo4j.return_value = MagicMock()
+        mock_emb.return_value = MagicMock()
+        
+        # Mock OpenAI response
+        mock_response = MagicMock()
+        mock_response.choices[0].message.content = json.dumps([
+            {"name": "test concept", "type": "concept", "description": "A test concept"}
+        ])
+        mock_openai.return_value.chat.completions.create.return_value = mock_response
+        
+        indexer = GraphRAGIndexer(mock_config)
+        # Same chunk text with same hash (simulating deduplication)
+        chunk_text = "This is a test text about concepts"
+        chunk_hash = "test_hash_same"
+        chunks = [
+            {"id": "chunk1", "text": chunk_text, "hash": chunk_hash},
+            {"id": "chunk2", "text": chunk_text, "hash": chunk_hash},  # Same text and hash
+        ]
+        
+        entities = indexer.extract_semantic_entities(chunks)
+        
+        # Should only call OpenAI once due to caching
+        assert mock_openai.return_value.chat.completions.create.call_count == 1
+        assert len(entities) > 0
     
     @patch('langfuse_graphrag.graphrag_indexer.Neo4jManager')
     @patch('langfuse_graphrag.graphrag_indexer.EmbeddingGenerator')
@@ -292,7 +416,7 @@ class TestGraphRAGIndexer:
             {"id": "c1", "name": "Test Community", "level": 0}
         ]
         chunks = [
-            {"id": "chunk1", "text": "Relevant text about the community"}
+            {"id": "chunk1", "text": "Relevant text about the community", "hash": "test_hash_summary"}
         ]
         
         result = indexer.generate_summaries(communities, chunks)
@@ -304,8 +428,39 @@ class TestGraphRAGIndexer:
     @patch('langfuse_graphrag.graphrag_indexer.Neo4jManager')
     @patch('langfuse_graphrag.graphrag_indexer.EmbeddingGenerator')
     @patch('langfuse_graphrag.graphrag_indexer.OpenAI')
+    def test_generate_summaries_caching(self, mock_openai, mock_emb, mock_neo4j, mock_config):
+        """Test that generate_summaries caches LLM responses for identical community-chunk pairs."""
+        mock_neo4j.return_value = MagicMock()
+        mock_emb.return_value = MagicMock()
+        
+        # Mock OpenAI response
+        mock_response = MagicMock()
+        mock_response.choices[0].message.content = "Test summary"
+        mock_openai.return_value.chat.completions.create.return_value = mock_response
+        
+        indexer = GraphRAGIndexer(mock_config)
+        communities = [
+            {"id": "c1", "name": "Test Community", "level": 0}
+        ]
+        chunks = [
+            {"id": "chunk1", "text": "Relevant text about the community", "hash": "test_hash_summary"}
+        ]
+        
+        # Call twice with same inputs
+        result1 = indexer.generate_summaries(communities, chunks)
+        result2 = indexer.generate_summaries(communities, chunks)
+        
+        # Should only call OpenAI once due to caching
+        assert mock_openai.return_value.chat.completions.create.call_count == 1
+        assert len(result1) == 1
+        assert len(result2) == 1
+        assert result1[0]["summary"] == result2[0]["summary"]
+    
+    @patch('langfuse_graphrag.graphrag_indexer.Neo4jManager')
+    @patch('langfuse_graphrag.graphrag_indexer.EmbeddingGenerator')
+    @patch('langfuse_graphrag.graphrag_indexer.OpenAI')
     def test_generate_summaries_api_error(self, mock_openai, mock_emb, mock_neo4j, mock_config):
-        """Test summary generation handles API errors."""
+        """Test summary generation raises on API errors."""
         mock_neo4j.return_value = MagicMock()
         mock_emb.return_value = MagicMock()
         
@@ -316,14 +471,11 @@ class TestGraphRAGIndexer:
         communities = [
             {"id": "c1", "name": "Test Community", "level": 0}
         ]
-        chunks = [{"id": "chunk1", "text": "Relevant text"}]
+        chunks = [{"id": "chunk1", "text": "Relevant text", "hash": "test_hash_error"}]
         
-        result = indexer.generate_summaries(communities, chunks)
-        
-        # Should have fallback summary
-        assert len(result) == 1
-        assert "summary" in result[0]
-        assert len(result[0]["summary"]) > 0
+        # Should raise RuntimeError on API error (per error handling rules)
+        with pytest.raises(RuntimeError, match="Failed to generate summary"):
+            indexer.generate_summaries(communities, chunks)
     
     @patch('langfuse_graphrag.graphrag_indexer.Neo4jManager')
     @patch('langfuse_graphrag.graphrag_indexer.EmbeddingGenerator')
@@ -423,7 +575,7 @@ class TestGraphRAGIndexer:
     @patch('langfuse_graphrag.graphrag_indexer.Neo4jManager')
     @patch('langfuse_graphrag.graphrag_indexer.EmbeddingGenerator')
     def test_index_pipeline_no_text(self, mock_emb, mock_neo4j, mock_config, mock_neo4j_manager, mock_embedding_generator):
-        """Test indexing pipeline with no extractable text."""
+        """Test indexing pipeline raises when no extractable text."""
         mock_neo4j.return_value = mock_neo4j_manager
         mock_emb.return_value = mock_embedding_generator
         
@@ -434,9 +586,6 @@ class TestGraphRAGIndexer:
             ],
         }
         
-        results = indexer.index(entities)
-        
-        assert isinstance(results, dict)
-        assert "SemanticEntity" in results
-        assert "Community" in results
-
+        # Should raise ValueError when no text content found (per error handling rules)
+        with pytest.raises(ValueError, match="No text content found"):
+            indexer.index(entities)

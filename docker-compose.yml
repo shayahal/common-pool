@@ -18,13 +18,14 @@ services:
     restart: unless-stopped
 
   neo4j:
-    image: neo4j:5.11-community
+    image: neo4j:5.11-enterprise
     container_name: neo4j-graphrag
     ports:
       - "7474:7474"   # HTTP
       - "7687:7687"   # Bolt
     environment:
       - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=eval
       - NEO4J_PLUGINS=["apoc", "graph-data-science"]
       - NEO4J_dbms_security_procedures_unrestricted=apoc.*,gds.*
       - NEO4J_dbms_security_procedures_allowlist=apoc.*,gds.*

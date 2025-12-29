@@ -6,7 +6,7 @@ Handles connection, schema creation, and operations for Neo4j graph database.
 import logging
 from typing import Dict, List, Optional, Any
 from neo4j import GraphDatabase
-from neo4j.exceptions import ServiceUnavailable, TransientError
+from neo4j.exceptions import ServiceUnavailable, TransientError, DatabaseUnavailable
 
 from langfuse_graphrag.config import get_config
 from langfuse_graphrag.ontology import (
@@ -45,10 +45,78 @@ class Neo4jManager:
         
         try:
             self.driver = GraphDatabase.driver(uri, auth=(user, password))
-            # Test connection
-            with self.driver.session(database=database) as session:
-                session.run("RETURN 1")
-            logger.info("Successfully connected to Neo4j")
+            # Test connection - try system database first to check availability
+            import time
+            max_retries = 10
+            retry_delay = 2
+            
+            for attempt in range(max_retries):
+                try:
+                    # First try system database to verify connection
+                    with self.driver.session(database="system") as session:
+                        result = session.run("SHOW DATABASES")
+                        databases = [record["name"] for record in result]
+                        logger.debug(f"Available databases: {databases}")
+                        
+                        # Check database status
+                        status_result = session.run("SHOW DATABASES YIELD name, currentStatus WHERE name = $db RETURN name, currentStatus", db=database)
+                        status_record = status_result.single()
+                        if status_record:
+                            status = status_record["currentStatus"]
+                            logger.debug(f"Database '{database}' status: {status}")
+                        
+                        # Check if target database exists
+                        if database not in databases:
+                            # Try to create it if it doesn't exist
+                            logger.info(f"Database '{database}' not found. Attempting to create it...")
+                            try:
+                                session.run(f"CREATE DATABASE {database} IF NOT EXISTS")
+                                logger.info(f"Created database '{database}'")
+                                # Wait a bit for database to be created
+                                time.sleep(3)
+                            except Exception as create_error:
+                                logger.error(f"Could not create database '{database}': {create_error}", exc_info=True)
+                                # Try using default database as fallback
+                                if "neo4j" in databases:
+                                    database = "neo4j"
+                                    logger.info(f"Using default database 'neo4j' as fallback")
+                                else:
+                                    # Use first available database as fallback
+                                    if databases:
+                                        database = databases[0]
+                                        logger.info(f"Using available database '{database}' as fallback")
+                                    else:
+                                        raise RuntimeError(f"Failed to create database '{database}' and no fallback databases available: {create_error}") from create_error
+                    
+                    # Now test the target database with retry
+                    db_ready = False
+                    for db_attempt in range(5):
+                        try:
+                            with self.driver.session(database=database) as session:
+                                session.run("RETURN 1")
+                            db_ready = True
+                            break
+                        except DatabaseUnavailable:
+                            if db_attempt < 4:
+                                logger.debug(f"Database '{database}' not ready yet, waiting {retry_delay}s...")
+                                time.sleep(retry_delay)
+                            else:
+                                raise
+                    
+                    if db_ready:
+                        logger.info(f"Successfully connected to Neo4j database '{database}'")
+                        self.config["neo4j_database"] = database  # Update config with actual database
+                        break
+                except DatabaseUnavailable as db_error:
+                    if attempt < max_retries - 1:
+                        logger.debug(f"Database '{database}' not ready yet, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})...")
+                        time.sleep(retry_delay)
+                    else:
+                        raise RuntimeError(
+                            f"Database '{database}' is unavailable after {max_retries} attempts. "
+                            f"This usually means Neo4j is still starting up. "
+                            f"Please wait a few minutes and try again, or check Neo4j logs for errors."
+                        ) from db_error
         except ServiceUnavailable as e:
             logger.error(f"Neo4j service unavailable: {e}")
             raise
@@ -84,7 +152,8 @@ class Neo4jManager:
                         session.run(constraint_query)
                         logger.debug(f"Created unique constraint on {entity_type}.id")
                     except Exception as e:
-                        logger.warning(f"Could not create constraint on {entity_type}.id: {e}")
+                        logger.error(f"Failed to create constraint on {entity_type}.id: {e}", exc_info=True)
+                        raise RuntimeError(f"Failed to create unique constraint on {entity_type}.id") from e
                 
                 # Create indexes on indexed properties
                 for prop in schema.indexes:
@@ -99,10 +168,15 @@ class Neo4jManager:
                         session.run(index_query)
                         logger.debug(f"Created index on {entity_type}.{prop}")
                     except Exception as e:
-                        logger.warning(f"Could not create index on {entity_type}.{prop}: {e}")
+                        logger.error(f"Failed to create index on {entity_type}.{prop}: {e}", exc_info=True)
+                        raise RuntimeError(f"Failed to create index on {entity_type}.{prop}") from e
             
             # Create vector indexes for embedding properties
+            # Vector indexes require Neo4j 5.11+ Enterprise Edition or AuraDB with vector search capabilities
             embedding_dimension = self.config.get("embedding_dimension", 1536)
+            
+            # Check Neo4j version and capabilities first
+            self._check_vector_index_support(session)
             
             # Generation embeddings
             vector_indexes = [
@@ -116,46 +190,139 @@ class Neo4jManager:
             
             for entity_type, prop, dim in vector_indexes:
                 index_name = f"{entity_type.lower()}_{prop}_vector_idx"
-                # Neo4j 5.11+ uses db.index.vector.createNodeIndex for vector indexes
-                # Note: This requires the vector index plugin to be installed
-                # For now, we'll skip vector index creation and use property indexes
-                # Vector similarity search can be done using db.index.vector.queryNodes
-                # or by storing embeddings as LIST<FLOAT> and using custom similarity functions
-                try:
-                    # Try the newer syntax first (Neo4j 5.11+)
-                    vector_index_query = f"""
-                    CALL db.index.vector.createNodeIndex(
-                        '{index_name}',
-                        '{entity_type}',
-                        '{prop}',
-                        {dim},
-                        'cosine'
-                    )
-                    """
-                    session.run(vector_index_query)
-                    logger.debug(f"Created vector index {index_name}")
-                except Exception as e:
-                    # If that fails, try the older CREATE VECTOR INDEX syntax
-                    try:
-                        vector_index_query = f"""
-                        CREATE VECTOR INDEX {index_name} IF NOT EXISTS
-                        FOR (n:{entity_type})
-                        ON n.{prop}
-                        OPTIONS {{
-                            indexConfig: {{
-                                `vector.dimensions`: {dim},
-                                `vector.similarity_function`: 'cosine'
-                            }}
-                        }}
-                        """
-                        session.run(vector_index_query)
-                        logger.debug(f"Created vector index {index_name} using CREATE syntax")
-                    except Exception as e2:
-                        # If both fail, log warning and continue - vector search will still work but slower
-                        logger.warning(f"Could not create vector index {index_name}. Vector search may be slower. Error: {e2}")
-                        logger.debug(f"Note: Vector indexes require Neo4j 5.11+ with vector index plugin installed")
+                self._create_vector_index(session, index_name, entity_type, prop, dim)
         
         logger.info("Schema creation completed")
+    
+    def _check_vector_index_support(self, session) -> None:
+        """Check if Neo4j supports vector indexes.
+        
+        Args:
+            session: Neo4j session
+            
+        Raises:
+            RuntimeError: If vector indexes are not supported
+        """
+        try:
+            # Check Neo4j version
+            version_result = session.run("CALL dbms.components() YIELD name, versions, edition RETURN name, versions[0] as version, edition")
+            version_record = version_result.single()
+            
+            if version_record:
+                edition = version_record.get("edition", "").upper()
+                version = version_record.get("version", "")
+                
+                # Vector indexes require Neo4j Enterprise or AuraDB
+                if "COMMUNITY" in edition:
+                    raise RuntimeError(
+                        f"Vector indexes are not supported in Neo4j Community Edition. "
+                        f"Detected: {edition} {version}. "
+                        f"Please use Neo4j Enterprise Edition 5.11+ or Neo4j AuraDB with vector search capabilities. "
+                        f"Alternatively, you can use a different vector store (e.g., Weaviate, Pinecone) and disable vector indexes."
+                    )
+                
+                # Check if version is 5.11+
+                try:
+                    major, minor = map(int, version.split(".")[:2])
+                    if major < 5 or (major == 5 and minor < 11):
+                        raise RuntimeError(
+                            f"Vector indexes require Neo4j 5.11+. "
+                            f"Detected version: {version}. "
+                            f"Please upgrade to Neo4j 5.11+ Enterprise Edition or AuraDB."
+                        )
+                except (ValueError, AttributeError):
+                    logger.warning(f"Could not parse Neo4j version: {version}")
+            
+            # Try to check if vector index procedure exists
+            try:
+                test_result = session.run("CALL dbms.procedures() YIELD name WHERE name = 'db.index.vector.createNodeIndex' RETURN count(*) as count")
+                count = test_result.single()["count"]
+                if count == 0:
+                    raise RuntimeError(
+                        "Vector index procedure 'db.index.vector.createNodeIndex' is not available. "
+                        "This indicates that vector search is not enabled in your Neo4j instance. "
+                        "Please use Neo4j Enterprise Edition 5.11+ or AuraDB with vector search capabilities."
+                    )
+            except Exception as e:
+                if isinstance(e, RuntimeError):
+                    raise
+                # If procedure check fails, we'll try to create the index and fail with a better error
+                logger.debug(f"Could not check vector index procedure availability: {e}")
+                
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.error(f"Could not check Neo4j vector index support: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to check Neo4j vector index support: {e}") from e
+    
+    def _create_vector_index(self, session, index_name: str, entity_type: str, prop: str, dim: int) -> None:
+        """Create a vector index, trying multiple syntax options.
+        
+        Args:
+            session: Neo4j session
+            index_name: Name of the vector index
+            entity_type: Entity type label
+            prop: Property name for the embedding
+            dim: Embedding dimension
+        
+        Raises:
+            RuntimeError: If vector index creation fails with all syntax options
+        """
+        # Try the newer syntax first (Neo4j 5.11+)
+        e1 = None
+        try:
+            vector_index_query = f"""
+            CALL db.index.vector.createNodeIndex(
+                '{index_name}',
+                '{entity_type}',
+                '{prop}',
+                {dim},
+                'cosine'
+            )
+            """
+            session.run(vector_index_query)
+            logger.debug(f"Created vector index {index_name}")
+            return
+        except Exception as e:
+            e1 = e
+            # Check if index already exists - that's fine, treat as success
+            error_str = str(e)
+            if "already exists" in error_str.lower() or "EquivalentSchemaRuleAlreadyExistsException" in error_str:
+                logger.debug(f"Vector index {index_name} already exists, skipping creation")
+                return
+            logger.debug(f"db.index.vector.createNodeIndex failed for {index_name}: {e1}")
+        
+        # Try the older CREATE VECTOR INDEX syntax
+        try:
+            vector_index_query = f"""
+            CREATE VECTOR INDEX {index_name} IF NOT EXISTS
+            FOR (n:{entity_type})
+            ON n.{prop}
+            OPTIONS {{
+                indexConfig: {{
+                    `vector.dimensions`: {dim},
+                    `vector.similarity_function`: 'cosine'
+                }}
+            }}
+            """
+            session.run(vector_index_query)
+            logger.debug(f"Created vector index {index_name} using CREATE syntax")
+            return
+        except Exception as e2:
+            logger.debug(f"CREATE VECTOR INDEX failed for {index_name}: {e2}")
+            # Both methods failed - raise error
+            first_error = f"Error from first attempt: {e1}" if e1 else "First attempt not executed"
+            error_msg = (
+                f"Failed to create vector index {index_name}. "
+                f"Vector indexes require Neo4j 5.11+ Enterprise Edition or AuraDB with vector search capabilities. "
+                f"{first_error}. Error from second attempt: {e2}. "
+                f"\n\nTo fix this issue:\n"
+                f"1. Use Neo4j Enterprise Edition 5.11+ or Neo4j AuraDB\n"
+                f"2. Ensure vector search is enabled in your Neo4j instance\n"
+                f"3. Check that your Neo4j license includes vector search capabilities"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg) from e2
     
     def create_nodes(self, entities: Dict[str, List[Dict[str, Any]]], batch_size: Optional[int] = None) -> None:
         """Create nodes in Neo4j from entities.

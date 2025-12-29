@@ -404,7 +404,8 @@ def run_experiment(
                 db_manager.close()
                 logger.debug("Database connection closed")
             except Exception as e:
-                logger.warning(f"Error closing database connection: {e}")
+                logger.error(f"Error closing database connection: {e}", exc_info=True)
+                raise RuntimeError(f"Failed to close database connection: {e}") from e
 
 
 # Note: This module is intended to be imported by experiment_worker.py only.

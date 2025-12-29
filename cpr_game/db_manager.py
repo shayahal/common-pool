@@ -97,9 +97,7 @@ class DatabaseManager:
         except Exception as e:
             error_msg = f"Failed to initialize database: {e}"
             logger.error(error_msg, exc_info=True)
-            self.conn = None
-            self.read_only_conn = None
-            self.enabled = False
+            raise RuntimeError(error_msg) from e
             if self.enabled:  # Only raise if database was supposed to be enabled
                 raise RuntimeError(error_msg) from e
 
@@ -247,8 +245,8 @@ class DatabaseManager:
                         self.conn.execute("UPDATE experiments SET Max_fish = max_fishes WHERE Max_fish IS NULL OR Max_fish = 0")
                         self.conn.execute("ALTER TABLE experiments DROP COLUMN max_fishes")
                 except Exception as e:
-                    logger.warning(f"Migration warning: {e}")
-                    # Continue anyway - might be a duplicate column error or rename might have already happened
+                    logger.error(f"Migration error: {e}", exc_info=True)
+                    raise RuntimeError(f"Failed to migrate column: {e}") from e
             
             # Migration: Check if we need to add parameter columns
             # Check if columns exist using PRAGMA
@@ -319,10 +317,11 @@ class DatabaseManager:
                                     continue
                             logger.info("Migration complete: existing data migrated to new columns")
                     except Exception as e:
-                        logger.warning(f"Could not migrate existing parameter data: {e}")
+                        logger.error(f"Could not migrate existing parameter data: {e}", exc_info=True)
+                        raise RuntimeError(f"Failed to migrate existing parameter data: {e}") from e
                 except Exception as e:
-                    logger.warning(f"Migration warning: {e}")
-                    # Columns might already exist
+                    logger.error(f"Migration error: {e}", exc_info=True)
+                    raise RuntimeError(f"Failed to migrate columns: {e}") from e
             
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS experiment_players (
@@ -357,8 +356,8 @@ class DatabaseManager:
                     # Note: SQLite doesn't support ALTER COLUMN SET NOT NULL directly,
                     # so we'll handle NULLs in application code for now
                 except Exception as e:
-                    logger.debug(f"Migration note (may be expected): {e}")
-                    pass  # Column might already exist or error is expected
+                    logger.error(f"Migration error: {e}", exc_info=True)
+                    raise RuntimeError(f"Failed to migrate column: {e}") from e
             
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS experiment_results (
@@ -451,6 +450,7 @@ class DatabaseManager:
             error_msg = f"Failed to create table: {e}"
             logger.error(error_msg, exc_info=True)
             raise RuntimeError(error_msg) from e
+            raise RuntimeError(error_msg) from e
             raise
 
     def get_read_connection(self):
@@ -478,8 +478,7 @@ class DatabaseManager:
             except Exception as e:
                 error_msg = f"Failed to create read-only connection: {e}"
                 logger.error(error_msg, exc_info=True)
-                # Read-only connection is optional, but log the error
-                # Don't raise - we can fall back to main connection
+                raise RuntimeError(error_msg) from e
                 return self.conn
         
         return self.read_only_conn

@@ -102,7 +102,8 @@ class LangfuseCSVParser:
             CSV type string
         """
         try:
-            df = pd.read_csv(self.csv_path, nrows=1)
+            # Read more rows to check for id != sessionId pattern
+            df = pd.read_csv(self.csv_path, nrows=10)
             columns = [col.lower() for col in df.columns]
             
             # Check for key identifying columns
@@ -116,13 +117,25 @@ class LangfuseCSVParser:
                 if any(col in columns for col in ["trace_id", "traceid"]):
                     return "trace"
                 else:
+                    # Check if id and sessionId have different values (indicates trace CSV)
+                    if "id" in df.columns:
+                        sessionid_cols = [c for c in df.columns if c.lower() == "sessionid"]
+                        if sessionid_cols:
+                            sessionid_col = sessionid_cols[0]
+                            # Check if id != sessionId in any row (indicates trace CSV)
+                            if not df[df["id"] != df[sessionid_col]].empty:
+                                logger.debug("Detected trace CSV: id != sessionId in some rows")
+                                return "trace"
                     return "session"
             elif any(col in columns for col in ["trace_id", "traceid"]):
                 return "trace"
             else:
-                # Default to trace if we can't determine
-                logger.warning(f"Could not determine CSV type, defaulting to 'trace'. Columns: {columns}")
-                return "trace"
+                # Cannot determine CSV type - this is an error
+                raise ValueError(
+                    f"Cannot determine CSV type from columns. "
+                    f"Expected columns like 'sessionId', 'traceId', 'spanId', etc. "
+                    f"Available columns: {columns[:20]}{'...' if len(columns) > 20 else ''}"
+                )
         except Exception as e:
             logger.error(f"Error detecting CSV type: {e}", exc_info=True)
             raise
@@ -224,6 +237,15 @@ class LangfuseCSVParser:
             df = pd.read_csv(self.csv_path)
             logger.debug(f"Loaded {len(df)} rows from CSV")
             
+            # Store original column values for critical fields before normalization
+            original_values = {}
+            critical_fields = ["id", "sessionId", "session_id"]
+            for field in critical_fields:
+                for col in df.columns:
+                    if col.lower() == field.lower():
+                        original_values[field] = df[col].to_dict()
+                        break
+            
             # Normalize column names
             column_mapping = {}
             for col in df.columns:
@@ -238,6 +260,11 @@ class LangfuseCSVParser:
             records = []
             for idx, row in df.iterrows():
                 record = {"_csv_type": csv_type, "_row_index": idx}
+                
+                # Preserve original values for critical fields
+                for field in critical_fields:
+                    if field in original_values:
+                        record[f"_original_{field}"] = original_values[field][idx]
                 
                 for col, value in row.items():
                     if pd.isna(value):

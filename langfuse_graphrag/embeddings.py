@@ -48,10 +48,12 @@ class EmbeddingGenerator:
         
         Returns:
             Embedding vector
+        
+        Raises:
+            ValueError: If text is empty or whitespace-only
         """
         if not text or not text.strip():
-            logger.warning("Empty text provided for embedding")
-            return []
+            raise ValueError("Cannot generate embedding for empty or whitespace-only text")
         
         try:
             response = self.client.embeddings.create(
@@ -70,18 +72,23 @@ class EmbeddingGenerator:
             texts: List of texts to embed
         
         Returns:
-            List of embedding vectors
+            List of embedding vectors (empty list for texts that were empty/whitespace)
+        
+        Note:
+            Empty or whitespace-only texts will have empty embedding lists in the result.
+            This is intentional to allow partial embedding of mixed content.
         """
         if not texts:
             return []
         
-        # Filter out empty texts
+        # Filter out empty texts, keeping track of which indices had valid content
         valid_texts = [t[:8000] if t else "" for t in texts]
         valid_indices = [i for i, t in enumerate(valid_texts) if t.strip()]
         valid_texts_filtered = [valid_texts[i] for i in valid_indices]
         
+        # If no valid texts, return empty embeddings for all
         if not valid_texts_filtered:
-            logger.warning("No valid texts for embedding")
+            logger.debug("No valid texts in batch for embedding - all texts were empty/whitespace")
             return [[] for _ in texts]
         
         try:
