@@ -17,6 +17,8 @@ For application-level logging (errors, info, debug), see logger_setup.py
 from typing import Dict, List, Optional, Any
 import time
 import logging
+import json
+import uuid
 from datetime import datetime
 from opentelemetry import trace
 
@@ -76,12 +78,20 @@ class LoggingManager:
         # Game tracking (thread identifier)
         self.game_id = None
         self.current_round = 0
+        self.user_id: Optional[str] = None
         # No root trace - each player action will be its own trace
 
         # Metrics accumulation (for dashboard/analysis only)
         self.round_metrics: List[Dict] = []
         self.generation_data: List[Dict] = []
         self.api_metrics_data: List[Dict] = []
+        
+        # Track trace start times for duration calculation
+        self.trace_start_times: Dict[str, datetime] = {}
+        
+        # Track current trace/span IDs for score logging
+        self.current_trace_ids: Dict[int, str] = {}  # player_id -> trace_id
+        self.current_span_ids: Dict[int, str] = {}  # player_id -> span_id
 
     def start_game_trace(self, game_id: str, config: Dict) -> None:
         """Initialize game tracking (thread).
@@ -92,6 +102,10 @@ class LoggingManager:
         """
         self.game_id = game_id
         self.current_round = 0
+        self.user_id = config.get("user_id") or config.get("experiment_id")
+        
+        # Log session start for GraphRAG
+        self.log_session_start(game_id, config)
 
         if self.tracer is None:
             logger.debug(f"OTel disabled - skipping thread initialization for game_id: {game_id}")
@@ -144,43 +158,59 @@ class LoggingManager:
             return
 
         try:
+            # Generate unique trace_id for GraphRAG
+            trace_timestamp = datetime.utcnow()
+            trace_id = f"{self.game_id}_{player_id}_round_{self.current_round}_{trace_timestamp.strftime('%Y%m%d%H%M%S%f')}"
+            
             # Each player action is its own trace (root span)
             trace_name = f"player_{player_id}_action_round_{self.current_round}"
             
-            # Create trace attributes
+            # Record trace start time for duration calculation
+            trace_start_time = trace_timestamp
+            self.trace_start_times[trace_id] = trace_start_time
+            
+            # Create trace attributes with all required fields for GraphRAG
             attributes = {
+                "trace_id": trace_id,  # Explicit trace_id for GraphRAG
+                "name": trace_name,
                 "player.id": player_id,
                 "action.extraction": float(action),
                 "game.id": self.game_id,
                 "round.number": self.current_round,
+                "timestamp": trace_start_time.isoformat(),  # ISO format timestamp
             }
             
+            # Add user_id if available
+            if self.user_id:
+                attributes["user_id"] = self.user_id
+            
+            # Build trace metadata as JSON
+            trace_metadata = {
+                "player_id": player_id,
+                "round": self.current_round,
+                "game_id": self.game_id,
+            }
+            if metadata:
+                trace_metadata.update(metadata)
             if reasoning:
-                attributes["reasoning"] = reasoning[:500]  # Limit length
+                trace_metadata["reasoning"] = reasoning
+            attributes["metadata"] = json.dumps(trace_metadata)
+            
+            if reasoning:
+                attributes["reasoning"] = reasoning  # Keep for backward compatibility
             
             # Add persona if available
             if metadata and "persona" in metadata:
                 attributes["player.persona"] = metadata["persona"]
             
             # Add LLM model info
-            attributes["llm.model"] = self.config.get("llm_model", "unknown")
+            llm_model = self.config.get("llm_model", "unknown")
+            attributes["llm.model"] = llm_model
             attributes["llm.temperature"] = self.config.get("llm_temperature", 0.7)
-            
-            # Add token usage if available
-            if api_metrics:
-                if api_metrics.get("prompt_tokens") is not None:
-                    attributes["llm.prompt_tokens"] = int(api_metrics["prompt_tokens"])
-                if api_metrics.get("completion_tokens") is not None:
-                    attributes["llm.completion_tokens"] = int(api_metrics["completion_tokens"])
-                if api_metrics.get("total_tokens") is not None:
-                    attributes["llm.total_tokens"] = int(api_metrics["total_tokens"])
-                if api_metrics.get("latency") is not None:
-                    attributes["llm.latency_seconds"] = float(api_metrics["latency"])
-                if api_metrics.get("cost") is not None:
-                    attributes["llm.cost"] = float(api_metrics["cost"])
 
             # Add input/output as attributes for Langfuse compatibility
             # Langfuse expects 'input' and 'output' attributes to display them in the UI
+            # Use full text (not truncated) for GraphRAG semantic extraction
             if self.config.get("log_llm_prompts", True):
                 # Build input from system prompt and user prompt
                 input_parts = []
@@ -199,6 +229,13 @@ class LoggingManager:
             # in span attributes to group traces into threads
             attributes["session_id"] = self.game_id
             
+            # Langfuse-specific attributes for proper OTel integration
+            # These ensure Langfuse correctly interprets the span type and metadata
+            attributes["langfuse.session.id"] = self.game_id
+            attributes["langfuse.trace.name"] = trace_name
+            attributes["langfuse.user.id"] = self.user_id or ""
+            attributes["langfuse.observation.type"] = "span"
+            
             # Create a new trace (root span) for this player action
             # Each trace is independent but grouped by session_id into a thread
             # This works for both Langfuse and LangSmith
@@ -207,6 +244,90 @@ class LoggingManager:
                 trace_name,
                 attributes=attributes
             ) as root_span:
+                # Record trace end time and calculate duration
+                trace_end_time = datetime.utcnow()
+                duration_ms = (trace_end_time - trace_start_time).total_seconds() * 1000
+                
+                # Update root span with duration
+                root_span.set_attribute("duration_ms", duration_ms)
+                root_span.set_attribute("end_time", trace_end_time.isoformat())
+                
+                # Create explicit LLM generation span for GraphRAG
+                span_id = str(uuid.uuid4())
+                generation_id = str(uuid.uuid4())
+                
+                # Store trace/span IDs for score logging
+                self.current_trace_ids[player_id] = trace_id
+                self.current_span_ids[player_id] = span_id
+                
+                # Create child span for LLM generation
+                # Use Langfuse-specific attributes for proper generation tracking
+                with self.tracer.start_as_current_span(
+                    "llm_generation",
+                    attributes={
+                        "span_id": span_id,
+                        "trace_id": trace_id,
+                        "type": "llm",
+                        "generation_id": generation_id,
+                        "start_time": trace_start_time.isoformat(),
+                        "model": llm_model,
+                        "temperature": self.config.get("llm_temperature", 0.7),
+                        # Langfuse-specific attributes
+                        "langfuse.observation.type": "generation",
+                        "langfuse.observation.name": f"player_{player_id}_generation",
+                        "langfuse.observation.model.name": llm_model,
+                        "gen_ai.system": "openai",
+                        "gen_ai.request.model": llm_model,
+                    }
+                ) as llm_span:
+                    llm_span_start = datetime.utcnow()
+                    
+                    # Add all generation fields to span attributes
+                    # Use both standard and Langfuse-specific attribute names
+                    if prompt:
+                        llm_span.set_attribute("prompt", prompt)
+                        llm_span.set_attribute("langfuse.observation.input", prompt)
+                        llm_span.set_attribute("gen_ai.prompt", prompt)
+                    if response:
+                        llm_span.set_attribute("response", response)
+                        llm_span.set_attribute("langfuse.observation.output", response)
+                        llm_span.set_attribute("gen_ai.completion", response)
+                    if system_prompt:
+                        llm_span.set_attribute("system_prompt", system_prompt)
+                        llm_span.set_attribute("gen_ai.system_prompt", system_prompt)
+                    if reasoning:
+                        llm_span.set_attribute("reasoning", reasoning)
+                        llm_span.set_attribute("langfuse.observation.metadata.reasoning", reasoning)
+                    
+                    # Add API metrics to span attributes with GraphRAG field names
+                    if api_metrics:
+                        if api_metrics.get("prompt_tokens") is not None:
+                            tokens_input = int(api_metrics["prompt_tokens"])
+                            llm_span.set_attribute("tokens_input", tokens_input)
+                            llm_span.set_attribute("llm.prompt_tokens", tokens_input)  # Keep for backward compatibility
+                        if api_metrics.get("completion_tokens") is not None:
+                            tokens_output = int(api_metrics["completion_tokens"])
+                            llm_span.set_attribute("tokens_output", tokens_output)
+                            llm_span.set_attribute("llm.completion_tokens", tokens_output)  # Keep for backward compatibility
+                        if api_metrics.get("total_tokens") is not None:
+                            llm_span.set_attribute("llm.total_tokens", int(api_metrics["total_tokens"]))
+                        if api_metrics.get("latency") is not None:
+                            latency_ms = float(api_metrics["latency"]) * 1000  # Convert seconds to ms
+                            llm_span.set_attribute("latency_ms", latency_ms)
+                            llm_span.set_attribute("llm.latency_seconds", float(api_metrics["latency"]))  # Keep for backward compatibility
+                        if api_metrics.get("cost") is not None:
+                            cost = float(api_metrics["cost"])
+                            llm_span.set_attribute("cost", cost)
+                            llm_span.set_attribute("llm.cost", cost)  # Keep for backward compatibility
+                            llm_span.set_attribute("langfuse.observation.usage.cost", cost)
+                    
+                    # Record span end time and calculate duration
+                    llm_span_end = datetime.utcnow()
+                    llm_duration_ms = (llm_span_end - llm_span_start).total_seconds() * 1000
+                    llm_span.set_attribute("end_time", llm_span_end.isoformat())
+                    llm_span.set_attribute("duration_ms", llm_duration_ms)
+                    llm_span.set_attribute("status", "success")
+                
                 # Add events for prompt/response (for backward compatibility and detailed logging)
                 if self.config.get("log_llm_prompts", True):
                     if system_prompt:
@@ -218,12 +339,14 @@ class LoggingManager:
                 
                 root_span.add_event("action.extracted", {"action": float(action)})
                 
-                # LLM generation spans will be auto-instrumented as child spans
+                # Clean up trace start time tracking
+                if trace_id in self.trace_start_times:
+                    del self.trace_start_times[trace_id]
 
             # Debug log for API calls
             if api_metrics:
                 logger.debug(
-                    f"✅ Logged trace (thread: {self.game_id}): {trace_name} | "
+                    f"Logged trace (thread: {self.game_id}): {trace_name} | "
                     f"Tokens: {api_metrics.get('total_tokens', 'N/A')} | "
                     f"Latency: {api_metrics.get('latency', 0):.2f}s | "
                     f"Cost: ${api_metrics.get('cost', 0):.4f}"
@@ -237,6 +360,21 @@ class LoggingManager:
         except Exception as e:
             error_msg = f"Error logging generation: {e}"
             logger.error(error_msg, exc_info=True)
+            
+            # Log error using enhanced error logging if possible
+            try:
+                trace_id = self.current_trace_ids.get(player_id, f"{self.game_id}_{player_id}_round_{self.current_round}_error")
+                span_id = self.current_span_ids.get(player_id)
+                self.log_error(
+                    trace_id=trace_id,
+                    span_id=span_id,
+                    error_type=type(e).__name__,
+                    message=str(e),
+                    stack_trace=None
+                )
+            except Exception as log_error:
+                logger.warning(f"Failed to log error: {log_error}")
+            
             # Still store data for dashboard/metrics before raising
             self._store_generation_data(player_id, prompt, response, action, reasoning, api_metrics)
             raise RuntimeError(error_msg) from e
@@ -296,7 +434,56 @@ class LoggingManager:
                     "cooperation.index": float(metrics.get("cooperation_index", 0)),
                 }
             ) as metrics_span:
-                # Add individual extractions and payoffs as events
+                # Log scores for GraphRAG
+                # Use the most recent trace_id for each player if available
+                for player_id in range(len(metrics.get("individual_extractions", []))):
+                    trace_id = self.current_trace_ids.get(player_id)
+                    span_id = self.current_span_ids.get(player_id)
+                    
+                    if trace_id:
+                        # Log cooperation index as score
+                        if "cooperation_index" in metrics:
+                            self.log_score(
+                                trace_id=trace_id,
+                                span_id=span_id,
+                                name="cooperation_index",
+                                value=float(metrics["cooperation_index"]),
+                                comment=f"Round {round_num} cooperation index"
+                            )
+                        
+                        # Log resource level as score
+                        if "resource_level" in metrics:
+                            self.log_score(
+                                trace_id=trace_id,
+                                span_id=span_id,
+                                name="resource_level",
+                                value=float(metrics["resource_level"]),
+                                comment=f"Round {round_num} resource level"
+                            )
+                        
+                        # Log individual extraction as score
+                        if "individual_extractions" in metrics and player_id < len(metrics["individual_extractions"]):
+                            extraction = metrics["individual_extractions"][player_id]
+                            self.log_score(
+                                trace_id=trace_id,
+                                span_id=span_id,
+                                name="extraction",
+                                value=float(extraction),
+                                comment=f"Round {round_num} extraction"
+                            )
+                        
+                        # Log individual payoff as score
+                        if "individual_payoffs" in metrics and player_id < len(metrics["individual_payoffs"]):
+                            payoff = metrics["individual_payoffs"][player_id]
+                            self.log_score(
+                                trace_id=trace_id,
+                                span_id=span_id,
+                                name="payoff",
+                                value=float(payoff),
+                                comment=f"Round {round_num} payoff"
+                            )
+                
+                # Add individual extractions and payoffs as events (for backward compatibility)
                 if "individual_extractions" in metrics:
                     for i, extraction in enumerate(metrics["individual_extractions"]):
                         metrics_span.add_event(
@@ -337,6 +524,18 @@ class LoggingManager:
                     "game.tragedy_occurred": bool(summary.get("tragedy_occurred", False)),
                     "game.avg_cooperation_index": float(summary.get("avg_cooperation_index", 0)),
                     "game.gini_coefficient": float(summary.get("gini_coefficient", 0)),
+                    # Langfuse-specific attributes
+                    "langfuse.session.id": self.game_id,
+                    "langfuse.observation.type": "span",
+                    "langfuse.trace.name": "game_summary",
+                    # Store summary as output for semantic extraction
+                    "output": json.dumps({
+                        "total_rounds": summary.get("total_rounds", 0),
+                        "final_resource": summary.get("final_resource_level", 0),
+                        "tragedy_occurred": summary.get("tragedy_occurred", False),
+                        "avg_cooperation_index": summary.get("avg_cooperation_index", 0),
+                        "gini_coefficient": summary.get("gini_coefficient", 0),
+                    }),
                 }
             ) as summary_span:
                 summary_span.add_event("game.completed")
@@ -344,7 +543,7 @@ class LoggingManager:
             # Flush all pending traces
             logger.info(f"Flushing OTel traces for thread: {self.game_id}...")
             self.otel_manager.flush()
-            logger.info(f"✓ Successfully flushed all traces for thread: {self.game_id}")
+            logger.info(f"[OK] Successfully flushed all traces for thread: {self.game_id}")
 
         except Exception as e:
             error_msg = f"Error ending game thread: {e}"
@@ -376,13 +575,169 @@ class LoggingManager:
         """
         return self.api_metrics_data.copy()
 
+    def log_session_start(
+        self,
+        session_id: str,
+        name: Optional[str] = None,
+        user_id: Optional[str] = None,
+        metadata: Optional[Dict] = None
+    ):
+        """Log session start for GraphRAG.
+        
+        Args:
+            session_id: Session identifier (game_id)
+            name: Optional session name
+            user_id: Optional user identifier
+            metadata: Optional session metadata
+        """
+        if self.tracer is None:
+            return
+        
+        try:
+            session_attributes = {
+                "session_id": session_id,
+                "created_at": datetime.utcnow().isoformat(),
+                # Langfuse-specific session attributes
+                "langfuse.session.id": session_id,
+                "langfuse.observation.type": "span",
+            }
+            
+            if name:
+                session_attributes["name"] = name
+            else:
+                session_attributes["name"] = f"Game Session {session_id}"
+            
+            if user_id:
+                session_attributes["user_id"] = user_id
+                session_attributes["langfuse.user.id"] = user_id
+            elif self.user_id:
+                session_attributes["user_id"] = self.user_id
+                session_attributes["langfuse.user.id"] = self.user_id
+            
+            if metadata:
+                session_attributes["metadata"] = json.dumps(metadata)
+                # Add game config as Langfuse metadata
+                if isinstance(metadata, dict):
+                    if "n_players" in metadata:
+                        session_attributes["game.n_players"] = metadata["n_players"]
+                    if "max_steps" in metadata:
+                        session_attributes["game.max_steps"] = metadata["max_steps"]
+                    if "llm_model" in metadata:
+                        session_attributes["game.llm_model"] = metadata["llm_model"]
+            
+            # Create a session span to ensure session entity is created
+            with self.tracer.start_as_current_span(
+                "session_start",
+                attributes=session_attributes
+            ) as session_span:
+                session_span.add_event("session.started")
+        except Exception as e:
+            logger.warning(f"Error logging session start: {e}")
+    
+    def log_score(
+        self,
+        trace_id: str,
+        span_id: Optional[str],
+        name: str,
+        value: float,
+        comment: Optional[str] = None
+    ):
+        """Log a score/metric for a trace or span.
+        
+        Args:
+            trace_id: Trace identifier
+            span_id: Optional span identifier
+            name: Score name (e.g., "cooperation_index", "resource_level")
+            value: Score value
+            comment: Optional comment/description
+        """
+        if self.tracer is None:
+            return
+        
+        try:
+            score_id = str(uuid.uuid4())
+            score_attributes = {
+                "score_id": score_id,
+                "trace_id": trace_id,
+                "name": name,
+                "value": float(value),
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            
+            if span_id:
+                score_attributes["span_id"] = span_id
+            
+            if comment:
+                score_attributes["comment"] = comment
+            
+            # Create score as span event
+            current_span = trace.get_current_span()
+            if current_span:
+                current_span.add_event("score.recorded", score_attributes)
+        except Exception as e:
+            logger.warning(f"Error logging score: {e}")
+    
+    def log_error(
+        self,
+        trace_id: str,
+        span_id: Optional[str],
+        error_type: str,
+        message: str,
+        stack_trace: Optional[str] = None,
+        metadata: Optional[Dict] = None
+    ):
+        """Log an error for a trace or span.
+        
+        Args:
+            trace_id: Trace identifier
+            span_id: Optional span identifier
+            error_type: Error type (e.g., "ValueError", "APIError")
+            message: Error message
+            stack_trace: Optional stack trace
+            metadata: Optional error metadata
+        """
+        if self.tracer is None:
+            return
+        
+        try:
+            error_id = str(uuid.uuid4())
+            error_attributes = {
+                "error_id": error_id,
+                "trace_id": trace_id,
+                "type": error_type,
+                "message": message,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            
+            if span_id:
+                error_attributes["span_id"] = span_id
+            
+            if stack_trace:
+                error_attributes["stack_trace"] = stack_trace
+            
+            if metadata:
+                error_attributes["metadata"] = json.dumps(metadata)
+            
+            # Create error span or event
+            current_span = trace.get_current_span()
+            if current_span:
+                current_span.record_exception(Exception(message))
+                current_span.set_status(trace.Status(trace.StatusCode.ERROR, message))
+                current_span.add_event("error.occurred", error_attributes)
+        except Exception as e:
+            logger.warning(f"Error logging error: {e}")
+
     def reset(self):
         """Reset manager state for new game."""
         self.game_id = None
         self.current_round = 0
+        self.user_id = None
         self.round_metrics = []
         self.generation_data = []
         self.api_metrics_data = []
+        self.trace_start_times = {}
+        self.current_trace_ids = {}
+        self.current_span_ids = {}
 
     def __del__(self):
         """Cleanup: flush any pending traces."""

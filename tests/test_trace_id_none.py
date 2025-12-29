@@ -43,3 +43,4 @@ class TestTraceIdNone:
         # Should have called start_generation
         assert mock_client.start_generation.called
 
+

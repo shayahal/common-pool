@@ -51,9 +51,17 @@ class GracefulOTLPExporter(SpanExporter):
         if not spans:
             return SpanExportResult.SUCCESS
         
+        # Log export attempt for debugging (INFO level so it's visible)
+        logger.info(f"Exporting {len(spans)} span(s) to {self.endpoint}")
+        for span in spans:
+            trace_id = span.context.trace_id if span.context.trace_id else None
+            trace_id_str = f"{trace_id:x}" if trace_id else "none"
+            logger.debug(f"  - Span: {span.name} (trace_id: {trace_id_str})")
+        
         try:
             result = self.exporter.export(spans)
             if result == SpanExportResult.SUCCESS:
+                logger.info(f"Successfully exported {len(spans)} span(s) to {self.endpoint}")
                 # Reset failure count on success
                 if self._failure_count > 0:
                     logger.info(f"OpenTelemetry export to {self.endpoint} recovered after {self._failure_count} failures")
@@ -183,8 +191,28 @@ class OTelManager:
         
         resource = Resource.create(resource_attrs)
         
-        # Create tracer provider
-        self.tracer_provider = TracerProvider(resource=resource)
+        # Check if we should reuse existing provider BEFORE creating a new one
+        # This prevents "Overriding of current TracerProvider is not allowed" warnings
+        # when multiple games run in parallel
+        # IMPORTANT: Only reuse if it's an SDK provider (not ProxyTracerProvider) so we can add span processors
+        from opentelemetry.trace import NoOpTracerProvider, ProxyTracerProvider
+        from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
+        
+        current_provider = trace.get_tracer_provider()
+        reuse_provider = False
+        
+        # Only reuse if it's an actual SDK provider (not ProxyTracerProvider or NoOpTracerProvider)
+        if isinstance(current_provider, SDKTracerProvider):
+            # Provider already exists and is an SDK provider, reuse it
+            logger.debug("Reusing existing SDK tracer provider")
+            self.tracer_provider = current_provider
+            self._provider_owned = False  # We didn't create it, so don't shutdown
+            reuse_provider = True
+        else:
+            # Create new tracer provider (either NoOpTracerProvider or ProxyTracerProvider exists)
+            logger.debug(f"Creating new tracer provider (current is {type(current_provider).__name__})")
+            self.tracer_provider = TracerProvider(resource=resource)
+            self._provider_owned = True
         
         # Configure exporter based on protocol
         # IMPORTANT: Langfuse only supports HTTP/protobuf, not gRPC
@@ -228,47 +256,61 @@ class OTelManager:
         exporter = GracefulOTLPExporter(base_exporter, endpoint)
         
         # Add OTLP span processor (for collector/LangFuse/LangSmith)
-        span_processor = BatchSpanProcessor(exporter)
-        self.tracer_provider.add_span_processor(span_processor)
+        # Use shorter export interval to send traces faster (default is 5s)
+        span_processor = BatchSpanProcessor(
+            exporter,
+            max_queue_size=2048,
+            export_timeout_millis=30000,
+            schedule_delay_millis=500  # Send batches every 500ms instead of default 5s
+        )
         
-        # Track if we created the provider ourselves (for flush/shutdown)
-        self._provider_owned = True
-        
-        # Set global tracer provider only if one doesn't exist
-        # This prevents "Overriding of current TracerProvider is not allowed" warnings
-        # when multiple games run in parallel
-        try:
-            current_provider = trace.get_tracer_provider()
-            # Check if it's a real provider (not NoOpTracerProvider)
-            # NoOpTracerProvider doesn't have resource attribute set properly
-            from opentelemetry.trace import NoOpTracerProvider, ProxyTracerProvider
-            from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
-            
-            is_proxy = isinstance(current_provider, ProxyTracerProvider)
-            is_sdk = isinstance(current_provider, SDKTracerProvider)
-            
-            if not isinstance(current_provider, NoOpTracerProvider):
-                # Provider already exists and is suitable, reuse it
-                logger.debug("Reusing existing tracer provider")
-                self.tracer_provider = current_provider
-                self._provider_owned = False  # We didn't create it, so don't flush/shutdown
-            else:
-                # No real provider, set ours
-                trace.set_tracer_provider(self.tracer_provider)
-        except Exception as e:
-            # If anything goes wrong, try to set our provider
-            logger.warning(f"Error setting tracer provider, attempting fallback: {e}")
+        # Set global tracer provider if we created a new one (must be set before adding processors)
+        if not reuse_provider:
             try:
                 trace.set_tracer_provider(self.tracer_provider)
-            except Exception as fallback_error:
+                logger.debug("Set new tracer provider as global")
+            except Exception as e:
                 # If setting fails (e.g., provider already set), just reuse existing
-                logger.debug(f"Fallback tracer provider setting failed, reusing existing: {fallback_error}")
+                logger.warning(f"Failed to set tracer provider, reusing existing: {e}")
                 try:
                     self.tracer_provider = trace.get_tracer_provider()
-                    self._provider_owned = False  # We didn't create it
+                    self._provider_owned = False
+                    reuse_provider = True  # Update flag since we're now reusing
                 except Exception as final_error:
                     logger.error(f"Failed to get existing tracer provider: {final_error}", exc_info=True)
                     raise
+        
+        # Always add span processor to the provider (whether we created it or reused it)
+        if isinstance(self.tracer_provider, SDKTracerProvider):
+            self.tracer_provider.add_span_processor(span_processor)
+            self._span_processor = span_processor
+            logger.debug(f"Added span processor to tracer provider (type: {type(self.tracer_provider).__name__})")
+        else:
+            # If provider is ProxyTracerProvider, try to get the actual SDK provider
+            from opentelemetry.trace import ProxyTracerProvider
+            if isinstance(self.tracer_provider, ProxyTracerProvider):
+                # Try to get the actual provider from the proxy
+                try:
+                    actual_provider = trace.get_tracer_provider()
+                    if isinstance(actual_provider, SDKTracerProvider):
+                        actual_provider.add_span_processor(span_processor)
+                        self._span_processor = span_processor
+                        logger.debug(f"Added span processor to actual SDK provider behind ProxyTracerProvider")
+                    else:
+                        logger.warning(
+                            f"Actual provider is not SDK provider (type: {type(actual_provider).__name__}), "
+                            f"cannot add span processor. Traces may not be exported!"
+                        )
+                        self._span_processor = None
+                except Exception as e:
+                    logger.warning(f"Failed to get actual provider from ProxyTracerProvider: {e}")
+                    self._span_processor = None
+            else:
+                logger.error(
+                    f"Tracer provider is not SDK provider (type: {type(self.tracer_provider).__name__}), "
+                    f"cannot add span processor. Traces will NOT be exported!"
+                )
+                self._span_processor = None
         
         # Get tracer
         self.tracer = trace.get_tracer(service_name)
@@ -278,7 +320,7 @@ class OTelManager:
             from opentelemetry.instrumentation.langchain import LangChainInstrumentor
             langchain_instrumentor = LangChainInstrumentor()
             langchain_instrumentor.instrument(tracer_provider=self.tracer_provider)
-            logger.info("✓ LangChain auto-instrumentation enabled")
+            logger.info("[OK] LangChain auto-instrumentation enabled")
         except ImportError:
             # LangChain instrumentation is optional, so ImportError is acceptable
             logger.debug("LangChain instrumentation not available - install opentelemetry-instrumentation-langchain for auto-instrumentation")
@@ -287,7 +329,7 @@ class OTelManager:
             logger.error(error_msg, exc_info=True)
             raise RuntimeError(error_msg) from e
         
-        logger.info(f"✓ OpenTelemetry initialized: service={service_name}, endpoint={endpoint}")
+        logger.info(f"[OK] OpenTelemetry initialized: service={service_name}, endpoint={endpoint}")
     
     def get_tracer(self):
         """Get the OTel tracer.
@@ -318,20 +360,60 @@ class OTelManager:
     
     def flush(self):
         """Flush all pending spans."""
-        if self.tracer_provider and self._provider_owned:
-            try:
-                # Check if provider has force_flush method (ProxyTracerProvider doesn't)
-                if hasattr(self.tracer_provider, 'force_flush'):
-                    self.tracer_provider.force_flush()
-                else:
-                    # ProxyTracerProvider or similar - can't flush directly
-                    logger.debug("Tracer provider doesn't support force_flush (likely ProxyTracerProvider)")
-            except AttributeError:
-                # Provider doesn't have force_flush - that's okay
-                logger.debug("Tracer provider doesn't support force_flush")
-            except Exception as e:
-                # Log warning but don't raise - flushing is best effort
-                logger.warning(f"Error flushing OTel spans: {e}")
+        try:
+            # First try to flush via span processor (works even if provider is reused)
+            if hasattr(self, '_span_processor') and self._span_processor:
+                try:
+                    self._span_processor.force_flush(timeout_millis=5000)
+                    logger.debug("Flushed spans via span processor")
+                except Exception as e:
+                    logger.debug(f"Span processor flush failed: {e}")
+            
+            # Also try provider flush if we own it
+            if self.tracer_provider and self._provider_owned:
+                try:
+                    # Check if provider has force_flush method (ProxyTracerProvider doesn't)
+                    if hasattr(self.tracer_provider, 'force_flush'):
+                        self.tracer_provider.force_flush(timeout_millis=5000)
+                        logger.debug("Flushed spans via tracer provider")
+                except AttributeError:
+                    # Provider doesn't have force_flush - that's okay
+                    logger.debug("Tracer provider doesn't support force_flush")
+                except Exception as e:
+                    logger.debug(f"Tracer provider flush failed: {e}")
+            
+            # If provider is a ProxyTracerProvider, try to get the actual SDK provider
+            from opentelemetry.trace import ProxyTracerProvider
+            if isinstance(self.tracer_provider, ProxyTracerProvider):
+                try:
+                    # ProxyTracerProvider delegates to the actual provider
+                    # Try to get the actual provider and flush its processors
+                    actual_provider = trace.get_tracer_provider()
+                    if hasattr(actual_provider, '_span_processors'):
+                        for processor in actual_provider._span_processors:
+                            try:
+                                processor.force_flush(timeout_millis=5000)
+                                logger.debug("Flushed spans via processor from ProxyTracerProvider")
+                            except Exception as e:
+                                logger.debug(f"Processor flush failed: {e}")
+                except Exception as e:
+                    logger.debug(f"Failed to flush via ProxyTracerProvider: {e}")
+            
+            # If provider is reused, try to get the SDK provider and flush its processors
+            if self.tracer_provider and not self._provider_owned:
+                try:
+                    from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
+                    if isinstance(self.tracer_provider, SDKTracerProvider):
+                        # Flush all span processors
+                        for processor in self.tracer_provider._span_processors:
+                            if hasattr(processor, 'force_flush'):
+                                processor.force_flush(timeout_millis=5000)
+                        logger.debug("Flushed spans via SDK tracer provider processors")
+                except Exception as e:
+                    logger.debug(f"Failed to flush via SDK provider: {e}")
+        except Exception as e:
+            # Log warning but don't raise - flushing is best effort
+            logger.warning(f"Error flushing OTel spans: {e}")
     
     def shutdown(self):
         """Shutdown tracer provider."""

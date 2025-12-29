@@ -139,7 +139,7 @@ class GameRunner:
         logger.info("Initializing OpenTelemetry logging...")
         try:
             self.logger = LoggingManager(self.config)
-            logger.info("✓ OpenTelemetry logging initialized successfully")
+            logger.info("[OK] OpenTelemetry logging initialized successfully")
         except Exception as e:
             # Check if it's a configuration error (missing API key, etc.) - allow game to continue
             error_str = str(e).lower()
@@ -173,7 +173,7 @@ class GameRunner:
             logger.error(error_msg, exc_info=True)
             raise RuntimeError(error_msg) from e
 
-        logger.info(f"✓ Game setup complete: {self.game_id}")
+        logger.info(f"[OK] Game setup complete: {self.game_id}")
 
         return self.game_id
 
@@ -197,7 +197,11 @@ class GameRunner:
             raise RuntimeError("Environment not initialized. Call setup_game() first.")
 
         # Start logging trace
-        self.logger.start_game_trace(self.game_id, self.config)
+        # Pass experiment_id as user_id if available
+        game_config = self.config.copy()
+        if self.experiment_id:
+            game_config["user_id"] = self.experiment_id
+        self.logger.start_game_trace(self.game_id, game_config)
 
         # Reset environment and agents
         observations, info = self.env.reset()
@@ -300,15 +304,30 @@ class GameRunner:
                 reasonings[i] = reasoning
 
                 # Log generation
-                self.logger.log_generation(
-                    player_id=i,
-                    prompt=prompt,
-                    response=reasoning or "",
-                    action=action,
-                    reasoning=reasoning,
-                    api_metrics=api_metrics,
-                    system_prompt=system_prompt
-                )
+                try:
+                    self.logger.log_generation(
+                        player_id=i,
+                        prompt=prompt,
+                        response=reasoning or "",
+                        action=action,
+                        reasoning=reasoning,
+                        api_metrics=api_metrics,
+                        system_prompt=system_prompt
+                    )
+                except Exception as e:
+                    # Log error using enhanced error logging
+                    if hasattr(self.logger, 'log_error'):
+                        trace_id = self.logger.current_trace_ids.get(i, "unknown")
+                        span_id = self.logger.current_span_ids.get(i)
+                        self.logger.log_error(
+                            trace_id=trace_id,
+                            span_id=span_id,
+                            error_type=type(e).__name__,
+                            message=str(e),
+                            stack_trace=None  # Could add traceback.format_exc() if needed
+                        )
+                    logger.error(f"Error logging generation for player {i}: {e}", exc_info=True)
+                    # Continue execution even if logging fails
 
                 # Add to dashboard with full context
                 if self.dashboard:
@@ -436,7 +455,7 @@ class GameRunner:
                 )
                 # Verify the save
                 if self.db_manager.verify_game_saved(self.game_id):
-                    logger.info(f"✓ Game results saved and verified for game {self.game_id}")
+                    logger.info(f"[OK] Game results saved and verified for game {self.game_id}")
                 else:
                     error_msg = f"Game results saved but verification failed for {self.game_id}"
                     logger.error(error_msg)

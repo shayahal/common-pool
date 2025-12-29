@@ -36,6 +36,10 @@ exporters:
   # 2. Comment/uncomment the appropriate exporter(s) below
   # 3. Update the exporters list in service.pipelines.traces
   
+  # Debug exporter to see what's being sent
+  debug:
+    verbosity: detailed
+    
   # Langfuse as OTel receiver (HTTP exporter supports full URLs)
   # Comment out if OTEL_RECEIVER="langsmith"
   otlphttp/langfuse:
@@ -64,6 +68,9 @@ exporters:
   #     insecure: true
 
 service:
+  telemetry:
+    logs:
+      level: debug
   pipelines:
     traces:
       receivers: [otlp]
@@ -72,5 +79,5 @@ service:
       # - "langfuse": [otlphttp/langfuse]
       # - "langsmith": [otlphttp/langsmith]
       # - "both": [otlphttp/langfuse, otlphttp/langsmith]
-      exporters: [otlphttp/langfuse]
+      exporters: [debug, otlphttp/langfuse]
 
