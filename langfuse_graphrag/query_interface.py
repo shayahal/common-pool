@@ -1118,3 +1118,309 @@ Be conversational, helpful, and clear. Maintain context from previous messages i
         """Clear conversation history (alias for reset)."""
         self.reset()
 
+
+class VectorRAGChat:
+    """Interactive chat interface using only vector RAG (semantic search).
+    
+    This chat uses semantic search to retrieve relevant context from embeddings,
+    but does not use the full graph structure, relationships, or communities.
+    All operations are traced via OpenTelemetry to Langfuse.
+    """
+    
+    def __init__(
+        self,
+        query_interface: Optional[QueryInterface] = None,
+        config: Optional[Dict[str, Any]] = None,
+        max_context_items: int = 10,
+        session_id: Optional[str] = None
+    ):
+        """Initialize vector RAG chat.
+        
+        Args:
+            query_interface: Optional QueryInterface instance. If None, creates new one.
+            config: Optional configuration dictionary.
+            max_context_items: Maximum number of context items to retrieve.
+            session_id: Optional session ID for grouping traces. If None, generates one.
+        """
+        self.query_interface = query_interface or QueryInterface(config)
+        self.max_context_items = max_context_items
+        
+        # Generate session ID for grouping traces
+        if session_id is None:
+            session_id = f"vector_rag_chat_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        self.session_id = session_id
+        
+        # Initialize OpenTelemetry tracing
+        try:
+            from cpr_game.otel_manager import OTelManager
+            self.otel_manager = OTelManager(config)
+            self.tracer = self.otel_manager.get_tracer()
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenTelemetry: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to initialize OpenTelemetry for chat tracing: {e}") from e
+        
+        # Conversation history
+        self.conversation_history: List[BaseMessage] = []
+        
+        # System prompt
+        self.system_prompt = """You are a helpful AI assistant with access to a knowledge base via vector search.
+
+The knowledge base contains:
+- Generations: LLM prompts, responses, and reasoning from traces
+- SemanticEntities: Extracted concepts, topics, and entities
+
+You can answer questions about the data in the knowledge base. When context is provided from vector search, use it to give accurate, detailed answers. If context is not provided or insufficient, you can still answer general questions, but let the user know when you're using general knowledge vs. specific data from the knowledge base.
+
+Be conversational, helpful, and clear. Maintain context from previous messages in the conversation."""
+        
+        # Initialize with system message
+        self.conversation_history.append(SystemMessage(content=self.system_prompt))
+        
+        # Message counter for trace naming
+        self.message_count = 0
+        
+        logger.info(f"Initialized vector RAG chat interface (session_id: {self.session_id})")
+    
+    def chat(
+        self,
+        user_message: str
+    ) -> str:
+        """Send a message and get a response using vector RAG.
+        
+        All operations are traced via OpenTelemetry to Langfuse.
+        
+        Args:
+            user_message: The user's message
+        
+        Returns:
+            The assistant's response
+        
+        Raises:
+            RuntimeError: If chat fails
+        """
+        logger.debug(f"Vector RAG chat message received: {user_message[:100]}...")
+        
+        self.message_count += 1
+        trace_name = f"vector_rag_chat_message_{self.message_count}"
+        trace_start_time = datetime.utcnow()
+        
+        # Create trace for this chat message
+        if self.tracer is None:
+            logger.error("Tracer is None - OpenTelemetry not initialized")
+            raise RuntimeError("OpenTelemetry tracer not available - cannot trace chat operations")
+        
+        # Create trace attributes
+        trace_attributes = {
+            "trace_id": f"{self.session_id}_msg_{self.message_count}",
+            "name": trace_name,
+            "session_id": self.session_id,
+            "user_message": user_message[:500],
+            "timestamp": trace_start_time.isoformat(),
+            "langfuse.trace.name": trace_name,
+            "langfuse.session.id": self.session_id,
+            "rag_type": "vector_only",
+        }
+        
+        # Create root span for this chat message
+        with self.tracer.start_as_current_span(
+            trace_name,
+            attributes=trace_attributes
+        ) as root_span:
+            context_text = ""
+            relevant_generations = []
+            relevant_entities = []
+            
+            # Vector search for context
+            logger.debug("Performing vector search for context")
+            
+            with self.tracer.start_as_current_span(
+                "vector_semantic_search",
+                attributes={
+                    "query": user_message[:500],
+                    "entity_types": "Generation,SemanticEntity",
+                }
+            ) as search_span:
+                # Retrieve relevant context using vector search only
+                relevant_generations = self.query_interface.semantic_search(
+                    query_text=user_message,
+                    entity_type="Generation",
+                    property_name="prompt_embedding",
+                    limit=self.max_context_items // 2,
+                    threshold=0.6
+                )
+                
+                relevant_entities = self.query_interface.semantic_search(
+                    query_text=user_message,
+                    entity_type="SemanticEntity",
+                    property_name="embedding",
+                    limit=self.max_context_items // 2,
+                    threshold=0.6
+                )
+                
+                # Set span attributes with results
+                search_span.set_attribute("generations_found", str(len(relevant_generations)))
+                search_span.set_attribute("entities_found", str(len(relevant_entities)))
+                
+                # Set output as JSON for Langfuse visibility
+                import json
+                search_output = {
+                    "generations": len(relevant_generations),
+                    "entities": len(relevant_entities),
+                    "generation_ids": [g["entity"].get("id", "unknown") for g in relevant_generations[:5]],
+                    "entity_names": [e["entity"].get("name", "unknown") for e in relevant_entities[:5]],
+                }
+                search_span.set_attribute("output", json.dumps(search_output))
+            
+            # Format context from vector search results
+            if relevant_generations or relevant_entities:
+                context_parts = []
+                if relevant_generations:
+                    context_parts.append("Relevant Generations from Knowledge Base:")
+                    for i, gen_result in enumerate(relevant_generations[:5], 1):
+                        gen = gen_result["entity"]
+                        context_parts.append(
+                            f"{i}. Prompt: {gen.get('prompt', '')[:200]}...\n"
+                            f"   Response: {gen.get('response', '')[:200]}..."
+                        )
+                
+                if relevant_entities:
+                    context_parts.append("\nRelevant Semantic Entities:")
+                    for i, entity_result in enumerate(relevant_entities[:5], 1):
+                        entity = entity_result["entity"]
+                        context_parts.append(
+                            f"{i}. {entity.get('name', 'Unknown')} ({entity.get('type', 'unknown')}): "
+                            f"{entity.get('description', '')[:200]}..."
+                        )
+                
+                context_text = "\n".join(context_parts)
+                logger.debug(f"Retrieved context ({len(relevant_generations)} generations, {len(relevant_entities)} entities)")
+            
+            # Build user message with context
+            if context_text:
+                full_user_message = f"{user_message}\n\n[Context from Vector Search]\n{context_text}"
+            else:
+                full_user_message = user_message
+            
+            # Add user message to history
+            self.conversation_history.append(HumanMessage(content=full_user_message))
+            
+            # Create explicit span for LLM generation with input/output
+            llm_model = self.query_interface.config.get("graphrag_llm_model", "unknown")
+            llm_temperature = self.query_interface.config.get("graphrag_llm_temperature", 0.0)
+            
+            with self.tracer.start_as_current_span(
+                "llm_generation",
+                attributes={
+                    "type": "llm",
+                    "model": llm_model,
+                    "temperature": str(llm_temperature),
+                    # Langfuse-specific attributes for proper generation display
+                    "langfuse.observation.type": "generation",
+                    "langfuse.observation.name": "vector_rag_llm_generation",
+                    "langfuse.observation.model.name": llm_model,
+                    "gen_ai.system": "openai",
+                    "gen_ai.request.model": llm_model,
+                    # Input attributes (multiple formats for compatibility)
+                    "input": full_user_message,
+                    "langfuse.observation.input": full_user_message,
+                    "gen_ai.prompt": full_user_message,
+                    "prompt": full_user_message,
+                }
+            ) as llm_span:
+                llm_span_start = datetime.utcnow()
+                
+                # Get response from LLM
+                response = self.query_interface.llm.invoke(self.conversation_history)
+                
+                # Extract response content
+                if hasattr(response, 'content'):
+                    content = response.content
+                    if isinstance(content, str):
+                        assistant_response = content
+                    elif isinstance(content, list):
+                        assistant_response = " ".join(str(item) for item in content)
+                    else:
+                        assistant_response = str(content)
+                else:
+                    assistant_response = str(response)
+                
+                llm_span_end = datetime.utcnow()
+                llm_duration_ms = (llm_span_end - llm_span_start).total_seconds() * 1000
+                
+                # Set output attributes (multiple formats for compatibility)
+                output_str = str(assistant_response) if not isinstance(assistant_response, str) else assistant_response
+                llm_span.set_attribute("output", output_str)
+                llm_span.set_attribute("langfuse.observation.output", output_str)
+                llm_span.set_attribute("gen_ai.completion", output_str)
+                llm_span.set_attribute("response", output_str)
+                
+                # Set system prompt if available
+                if self.conversation_history and isinstance(self.conversation_history[0], SystemMessage):
+                    system_prompt_content = self.conversation_history[0].content
+                    system_prompt_str = str(system_prompt_content) if not isinstance(system_prompt_content, str) else system_prompt_content
+                    llm_span.set_attribute("system_prompt", system_prompt_str)
+                    llm_span.set_attribute("gen_ai.system_prompt", system_prompt_str)
+                
+                # Set duration and status
+                llm_span.set_attribute("duration_ms", str(llm_duration_ms))
+                llm_span.set_attribute("end_time", llm_span_end.isoformat())
+                llm_span.set_attribute("status", "success")
+                
+                # Try to get token usage from response if available
+                if hasattr(response, 'response_metadata'):
+                    metadata = response.response_metadata
+                    if metadata and 'token_usage' in metadata:
+                        token_usage = metadata['token_usage']
+                        if 'prompt_tokens' in token_usage:
+                            tokens_input = int(token_usage['prompt_tokens'])
+                            llm_span.set_attribute("tokens_input", str(tokens_input))
+                            llm_span.set_attribute("llm.prompt_tokens", str(tokens_input))
+                            llm_span.set_attribute("langfuse.observation.usage.input", str(tokens_input))
+                        if 'completion_tokens' in token_usage:
+                            tokens_output = int(token_usage['completion_tokens'])
+                            llm_span.set_attribute("tokens_output", str(tokens_output))
+                            llm_span.set_attribute("llm.completion_tokens", str(tokens_output))
+                            llm_span.set_attribute("langfuse.observation.usage.output", str(tokens_output))
+                        if 'total_tokens' in token_usage:
+                            llm_span.set_attribute("llm.total_tokens", str(token_usage['total_tokens']))
+                        if 'total_cost' in token_usage:
+                            llm_span.set_attribute("cost", str(token_usage['total_cost']))
+                            llm_span.set_attribute("langfuse.observation.usage.cost", str(token_usage['total_cost']))
+            
+            # Add assistant response to history
+            self.conversation_history.append(AIMessage(content=assistant_response))
+            
+            # Set trace end attributes
+            trace_end_time = datetime.utcnow()
+            duration_ms = (trace_end_time - trace_start_time).total_seconds() * 1000
+            root_span.set_attribute("end_time", trace_end_time.isoformat())
+            root_span.set_attribute("duration_ms", str(duration_ms))
+            root_span.set_attribute("response_length", str(len(assistant_response)))
+            root_span.set_attribute("context_used", str(bool(context_text)))
+            
+            # Set input/output for Langfuse visibility
+            root_span.set_attribute("input", user_message[:1000])
+            root_span.set_attribute("output", assistant_response[:1000])
+            root_span.set_attribute("langfuse.input", user_message[:1000])
+            root_span.set_attribute("langfuse.output", assistant_response[:1000])
+            
+            logger.debug(f"Generated response (length: {len(assistant_response)} chars)")
+            return assistant_response
+    
+    def reset(self) -> None:
+        """Reset conversation history."""
+        self.conversation_history = [SystemMessage(content=self.system_prompt)]
+        logger.info("Conversation history reset")
+    
+    def get_history(self) -> List[BaseMessage]:
+        """Get conversation history.
+        
+        Returns:
+            List of messages in the conversation
+        """
+        return self.conversation_history.copy()
+    
+    def clear_history(self) -> None:
+        """Clear conversation history (alias for reset)."""
+        self.reset()
+
