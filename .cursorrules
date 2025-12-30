@@ -206,8 +206,48 @@ The `langfuse_graphrag/` module follows the same rules as the main codebase:
 - If a feature requires a specific Neo4j version, the code MUST fail clearly with an error message, not silently degrade
 - Use `skip_vector_indexes=True` config option if user wants to explicitly skip vector indexes
 
-### Config Options for Graceful Degradation
-If the user explicitly requests graceful degradation, add a config option:
-- `skip_vector_indexes: bool` - Skip vector index creation if Neo4j doesn't support it
-- These options MUST be explicitly set by the user, not auto-detected silently
+### ⚠️⚠️⚠️ CRITICAL: NO FALLBACKS, NO FEATURE FLAGS, NO SUBOPTIMAL FLOWS ⚠️⚠️⚠️
+
+**THIS IS ABSOLUTELY FORBIDDEN. NO EXCEPTIONS.**
+
+- **NEVER EVER** implement fallback logic or alternative code paths
+- **NEVER EVER** use try-except to catch errors and try a different method
+- **NEVER EVER** implement feature flags or conditional behavior based on capabilities
+- **NEVER EVER** create "graceful degradation" or "best effort" code paths
+- **NEVER EVER** have multiple ways to do the same thing (e.g., "try method A, if it fails try method B")
+- **NEVER EVER** silently continue with a suboptimal approach if the optimal one fails
+- **ALWAYS** use the single, correct, optimal method
+- **ALWAYS** fail immediately and clearly if requirements aren't met
+- If a feature requires specific capabilities (e.g., Neo4j 5.11+ Enterprise), the code MUST fail with a clear error message explaining the requirement
+- **THERE IS NO EXCEPTION TO THIS RULE**
+
+**FORBIDDEN PATTERNS:**
+```python
+# ❌ FORBIDDEN: Fallback logic
+try:
+    optimal_method()
+except:
+    suboptimal_method()  # NEVER DO THIS
+
+# ❌ FORBIDDEN: Feature flags
+if has_capability:
+    use_optimal()
+else:
+    use_fallback()  # NEVER DO THIS
+
+# ❌ FORBIDDEN: Multiple code paths
+try:
+    method_a()
+except:
+    try:
+        method_b()
+    except:
+        method_c()  # NEVER DO THIS
+```
+
+**CORRECT PATTERN:**
+```python
+# ✅ CORRECT: Single method, fail clearly if requirements not met
+optimal_method()  # If this fails, the error propagates immediately
+```
 

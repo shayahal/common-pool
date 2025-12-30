@@ -272,8 +272,6 @@ class OTelManager:
             except Exception as e:
                 logger.error(f"Failed to set tracer provider: {e}", exc_info=True)
                 raise RuntimeError(f"Failed to set tracer provider: {e}") from e
-                    logger.error(f"Failed to get existing tracer provider: {final_error}", exc_info=True)
-                    raise
         
         # Always add span processor to the provider (whether we created it or reused it)
         if isinstance(self.tracer_provider, SDKTracerProvider):

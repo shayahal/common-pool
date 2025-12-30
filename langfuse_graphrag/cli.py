@@ -17,7 +17,7 @@ from langfuse_graphrag.extractor import EntityExtractor
 from langfuse_graphrag.neo4j_manager import Neo4jManager
 from langfuse_graphrag.embeddings import EmbeddingGenerator
 from langfuse_graphrag.graphrag_indexer import GraphRAGIndexer
-from langfuse_graphrag.query_interface import QueryInterface
+from langfuse_graphrag.query_interface import QueryInterface, InteractiveChat
 
 
 def setup_logging() -> logging.Logger:
@@ -306,6 +306,145 @@ def search_command(args):
         sys.exit(1)
 
 
+def ask_command(args):
+    """Answer a question using LLM with GraphRAG context."""
+    question = args.question
+    max_context = args.max_context or 10
+    include_graph = not args.no_graph_context
+    max_depth = args.max_depth or 2
+    
+    logger.info(f"Answering question: '{question}'")
+    
+    try:
+        config = get_config()
+        query_interface = QueryInterface(config)
+        
+        result = query_interface.answer_question(
+            question=question,
+            max_context_items=max_context,
+            include_graph_context=include_graph,
+            max_graph_depth=max_depth
+        )
+        
+        # Output results
+        if args.output:
+            output_path = Path(args.output)
+            with open(output_path, 'w') as f:
+                json.dump(result, f, indent=2, default=str)
+            logger.info(f"Results written to {output_path}")
+        else:
+            # Pretty print for console
+            print("\n" + "="*80)
+            print("QUESTION:")
+            print("="*80)
+            print(question)
+            print("\n" + "="*80)
+            print("ANSWER:")
+            print("="*80)
+            print(result["answer"])
+            print("\n" + "="*80)
+            print("SOURCES:")
+            print("="*80)
+            for source in result["sources"]:
+                print(f"  - {source}")
+            print(f"\nContext Summary: {result['context_summary']}")
+            print("="*80 + "\n")
+        
+    except Exception as e:
+        logger.error(f"Error answering question: {e}", exc_info=True)
+        sys.exit(1)
+
+
+def chat_command(args):
+    """Start interactive chat session."""
+    logger.info("Starting interactive chat session")
+    
+    try:
+        config = get_config()
+        chat = InteractiveChat(
+            config=config,
+            use_graphrag_context=True,
+            auto_retrieve_context=not args.no_context,
+            max_context_items=args.max_context or 10
+        )
+        
+        print("\n" + "="*80)
+        print("GraphRAG Interactive Chat")
+        print("="*80)
+        print("\nAsk questions about your knowledge graph data.")
+        print("Type /help for commands, /exit to quit.\n")
+        
+        context_enabled = not args.no_context
+        
+        while True:
+            try:
+                user_input = input("You: ").strip()
+                
+                if not user_input:
+                    continue
+                
+                # Handle commands
+                if user_input.startswith("/"):
+                    command = user_input.lower()
+                    
+                    if command in ["/exit", "/quit"]:
+                        print("\nGoodbye!\n")
+                        break
+                    
+                    elif command == "/help":
+                        print("""
+Commands:
+  /help     - Show this help message
+  /reset    - Reset conversation history
+  /context  - Toggle automatic context retrieval
+  /exit     - Exit the chat
+""")
+                        continue
+                    
+                    elif command == "/reset":
+                        chat.reset()
+                        print("Conversation history reset.\n")
+                        continue
+                    
+                    elif command == "/context":
+                        context_enabled = not context_enabled
+                        chat.auto_retrieve_context = context_enabled
+                        status = "enabled" if context_enabled else "disabled"
+                        print(f"Automatic context retrieval {status}.\n")
+                        continue
+                    
+                    else:
+                        print(f"Unknown command: {user_input}. Type /help for available commands.\n")
+                        continue
+                
+                # Regular message
+                print("\nAssistant: ", end="", flush=True)
+                
+                try:
+                    response = chat.chat(user_input, use_context=context_enabled)
+                    print(response)
+                    print()
+                    
+                except KeyboardInterrupt:
+                    print("\n\nInterrupted. Type /exit to quit.\n")
+                    continue
+                except Exception as e:
+                    logger.error(f"Error getting response: {e}", exc_info=True)
+                    print(f"\nError: {e}\n")
+                    continue
+                    
+            except EOFError:
+                print("\n\nGoodbye!\n")
+                break
+            except KeyboardInterrupt:
+                print("\n\nType /exit to quit.\n")
+                continue
+                
+    except Exception as e:
+        logger.error(f"Error in chat: {e}", exc_info=True)
+        sys.exit(1)
+
+
 def analyze_command(args):
     """Run analysis queries."""
     analysis_type = args.type
@@ -407,6 +546,21 @@ def main():
     search_parser.add_argument("--threshold", type=float, help="Similarity threshold")
     search_parser.add_argument("--output", help="Output file path (JSON)")
     search_parser.set_defaults(func=search_command)
+    
+    # Ask command (LLM question answering)
+    ask_parser = subparsers.add_parser("ask", help="Answer a question using LLM with GraphRAG context")
+    ask_parser.add_argument("question", help="Question to answer")
+    ask_parser.add_argument("--max-context", type=int, default=10, help="Maximum number of context items to retrieve")
+    ask_parser.add_argument("--no-graph-context", action="store_true", help="Disable graph context (neighbors/relationships)")
+    ask_parser.add_argument("--max-depth", type=int, default=2, help="Maximum depth for graph traversal")
+    ask_parser.add_argument("--output", help="Output file path (JSON)")
+    ask_parser.set_defaults(func=ask_command)
+    
+    # Chat command (interactive chat)
+    chat_parser = subparsers.add_parser("chat", help="Start interactive chat session with GraphRAG context")
+    chat_parser.add_argument("--no-context", action="store_true", help="Disable automatic context retrieval")
+    chat_parser.add_argument("--max-context", type=int, default=10, help="Maximum number of context items to retrieve")
+    chat_parser.set_defaults(func=chat_command)
     
     # Analyze command
     analyze_parser = subparsers.add_parser("analyze", help="Run analysis queries")
