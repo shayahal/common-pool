@@ -244,20 +244,214 @@ class EntityExtractor:
         self.entities[trace_type].append(trace_entity)
     
     def _extract_traces(self, records: List[Dict[str, Any]]) -> None:
-        """Extract Trace entities."""
-        entity_type = EntityType.TRACE.value
-        if entity_type not in self.entities:
-            self.entities[entity_type] = []
+        """Extract Trace entities, and also Span/Generation entities from player action rows."""
+        import re
         
-        schema = get_entity_schema(entity_type)
-        if not schema:
-            logger.error(f"No schema found for {entity_type}")
+        trace_type = EntityType.TRACE.value
+        span_type = EntityType.SPAN.value
+        generation_type = EntityType.GENERATION.value
+        
+        # Initialize entity lists
+        if trace_type not in self.entities:
+            self.entities[trace_type] = []
+        if span_type not in self.entities:
+            self.entities[span_type] = []
+        if generation_type not in self.entities:
+            self.entities[generation_type] = []
+        
+        trace_schema = get_entity_schema(trace_type)
+        span_schema = get_entity_schema(span_type)
+        generation_schema = get_entity_schema(generation_type)
+        
+        if not trace_schema:
+            logger.error(f"No schema found for {trace_type}")
             return
         
         for record in records:
-            entity = self._build_entity(record, schema, entity_type)
-            if entity:
-                self.entities[entity_type].append(entity)
+            # Always create Trace entity
+            trace_entity = self._build_entity(record, trace_schema, trace_type)
+            if trace_entity:
+                # Extract all CSV fields
+                for field in ["release", "version", "environment", "tags", "bookmarked", "public", "comments"]:
+                    if field in record:
+                        trace_entity[field] = record[field]
+                
+                # Extract game metrics from game_summary output
+                name = record.get("name", "")
+                if name == "game_summary":
+                    output = record.get("output", "")
+                    if output:
+                        # Strip quotes if present
+                        if isinstance(output, str):
+                            output = output.strip()
+                            if (output.startswith('"') and output.endswith('"')) or (output.startswith("'") and output.endswith("'")):
+                                output = output[1:-1]
+                        try:
+                            game_metrics = json.loads(output) if isinstance(output, str) else output
+                            if isinstance(game_metrics, dict):
+                                trace_entity["total_rounds"] = game_metrics.get("total_rounds")
+                                trace_entity["final_resource"] = game_metrics.get("final_resource")
+                                trace_entity["tragedy_occurred"] = game_metrics.get("tragedy_occurred")
+                                trace_entity["avg_cooperation_index"] = game_metrics.get("avg_cooperation_index")
+                                trace_entity["gini_coefficient"] = game_metrics.get("gini_coefficient")
+                                trace_entity["payoff_fairness"] = game_metrics.get("payoff_fairness")
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                
+                # Extract round metrics from round_X_metrics rows (from CSV columns)
+                if name and re.match(r"round_\d+_metrics", name):
+                    # Extract round number from name
+                    round_match = re.search(r"round_(\d+)_metrics", name)
+                    if round_match:
+                        trace_entity["round"] = int(round_match.group(1))
+                    
+                    # Extract round metrics from CSV columns
+                    for col in record.keys():
+                        if col.startswith(f"round_{trace_entity.get('round', '')}_"):
+                            metric_name = col.replace(f"round_{trace_entity.get('round', '')}_", "")
+                            if metric_name == "cooperation_index":
+                                trace_entity["cooperation_index"] = record[col]
+                            elif metric_name == "resource_level":
+                                trace_entity["resource_level"] = record[col]
+                            elif metric_name == "total_extraction":
+                                trace_entity["total_extraction"] = record[col]
+                
+                # Enhanced metadata parsing - extract all nested fields
+                metadata = record.get("metadata")
+                if metadata:
+                    if isinstance(metadata, str):
+                        try:
+                            metadata_dict = json.loads(metadata)
+                        except json.JSONDecodeError:
+                            metadata_dict = {}
+                    else:
+                        metadata_dict = metadata
+                    
+                    if isinstance(metadata_dict, dict):
+                        # Extract attributes (may be nested JSON string)
+                        attributes = metadata_dict.get("attributes")
+                        if isinstance(attributes, str):
+                            try:
+                                attributes = json.loads(attributes)
+                            except json.JSONDecodeError:
+                                attributes = {}
+                        
+                        if isinstance(attributes, dict):
+                            # Extract action.extraction
+                            action = attributes.get("action", {})
+                            if isinstance(action, dict):
+                                trace_entity["action_extraction"] = action.get("extraction")
+                            
+                            # Extract reasoning
+                            trace_entity["reasoning"] = attributes.get("reasoning")
+                            
+                            # Extract LLM info
+                            llm = attributes.get("llm", {})
+                            if isinstance(llm, dict):
+                                trace_entity["llm_model"] = llm.get("model")
+                                trace_entity["llm_temperature"] = llm.get("temperature")
+                            
+                            # Extract end_time
+                            end_time = attributes.get("end_time")
+                            if end_time:
+                                trace_entity["end_time"] = end_time
+                            
+                            # Extract game_id, player_id, round if not already set
+                            if not trace_entity.get("game_id"):
+                                trace_entity["game_id"] = attributes.get("game.id") or attributes.get("game_id")
+                            if not trace_entity.get("player_id"):
+                                trace_entity["player_id"] = attributes.get("player.id") or attributes.get("player_id")
+                            if not trace_entity.get("round") and attributes.get("round") is not None:
+                                try:
+                                    trace_entity["round"] = int(attributes.get("round"))
+                                except (ValueError, TypeError):
+                                    trace_entity["round"] = attributes.get("round")
+                
+                self.entities[trace_type].append(trace_entity)
+            
+            # Check if this is a player action row (should also be a Span)
+            name = record.get("name", "")
+            trace_id = record.get("_original_id") or record.get("id")
+            
+            # Pattern: player_X_action_round_Y
+            if name and re.match(r"player_\d+_action_round_\d+", name):
+                # Create Span entity from this record
+                span_id = f"{trace_id}_span"
+                span_entity = {
+                    "_type": span_type,
+                    "id": span_id,
+                    "trace_id": trace_id,
+                    "name": name,
+                    "type": "llm",  # Player actions are LLM calls
+                    "input": record.get("input"),
+                    "output": record.get("output"),
+                    "timestamp": record.get("timestamp") or record.get("createdAt"),
+                    "metadata": record.get("metadata"),
+                }
+                
+                # Extract reasoning from metadata if present
+                metadata = record.get("metadata")
+                if metadata:
+                    if isinstance(metadata, str):
+                        try:
+                            metadata_dict = json.loads(metadata)
+                        except json.JSONDecodeError:
+                            metadata_dict = {}
+                    else:
+                        metadata_dict = metadata
+                    
+                    # Check nested attributes
+                    if isinstance(metadata_dict, dict):
+                        attributes = metadata_dict.get("attributes")
+                        if isinstance(attributes, str):
+                            try:
+                                attributes = json.loads(attributes)
+                            except json.JSONDecodeError:
+                                attributes = {}
+                        if isinstance(attributes, dict):
+                            span_entity["reasoning"] = attributes.get("reasoning")
+                
+                self.entities[span_type].append(span_entity)
+                
+                # If span has input/output, create Generation entity
+                input_text = record.get("input")
+                output_text = record.get("output")
+                if input_text or output_text:
+                    generation_id = f"{span_id}_gen"
+                    generation_entity = {
+                        "_type": generation_type,
+                        "id": generation_id,
+                        "span_id": span_id,
+                        "prompt": input_text or "",
+                        "response": output_text or "",
+                        "metadata": record.get("metadata"),
+                    }
+                    
+                    # Extract model, temperature, etc. from metadata
+                    if metadata:
+                        if isinstance(metadata, str):
+                            try:
+                                metadata_dict = json.loads(metadata)
+                            except json.JSONDecodeError:
+                                metadata_dict = {}
+                        else:
+                            metadata_dict = metadata
+                        
+                        if isinstance(metadata_dict, dict):
+                            attributes = metadata_dict.get("attributes")
+                            if isinstance(attributes, str):
+                                try:
+                                    attributes = json.loads(attributes)
+                                except json.JSONDecodeError:
+                                    attributes = {}
+                            if isinstance(attributes, dict):
+                                llm_info = attributes.get("llm", {})
+                                if isinstance(llm_info, dict):
+                                    generation_entity["model"] = llm_info.get("model")
+                                    generation_entity["temperature"] = llm_info.get("temperature")
+                                generation_entity["reasoning"] = attributes.get("reasoning")
+                    
+                    self.entities[generation_type].append(generation_entity)
     
     def _extract_spans(self, records: List[Dict[str, Any]]) -> None:
         """Extract Span entities."""

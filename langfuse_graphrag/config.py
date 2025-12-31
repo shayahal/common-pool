@@ -27,7 +27,7 @@ NEO4J_DATABASE: str = os.getenv("NEO4J_DATABASE", "neo4j")
 # Using gpt-3.5-turbo for faster and cheaper processing
 GRAPHRAG_LLM_MODEL: str = os.getenv("GRAPHRAG_LLM_MODEL", "gpt-3.5-turbo")
 GRAPHRAG_LLM_TEMPERATURE: float = float(os.getenv("GRAPHRAG_LLM_TEMPERATURE", "0.0"))
-GRAPHRAG_LLM_MAX_TOKENS: int = int(os.getenv("GRAPHRAG_LLM_MAX_TOKENS", "4000"))
+GRAPHRAG_LLM_MAX_TOKENS: int = int(os.getenv("GRAPHRAG_LLM_MAX_TOKENS", "4096"))
 
 # Embedding Model
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
@@ -37,10 +37,10 @@ EMBEDDING_DIMENSION: int = int(os.getenv("EMBEDDING_DIMENSION", "1536"))  # text
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
 # GraphRAG Processing Settings
-GRAPHRAG_BATCH_SIZE: int = int(os.getenv("GRAPHRAG_BATCH_SIZE", "100"))
+GRAPHRAG_BATCH_SIZE: int = int(os.getenv("GRAPHRAG_BATCH_SIZE", "50"))
 GRAPHRAG_CHUNK_SIZE: int = int(os.getenv("GRAPHRAG_CHUNK_SIZE", "1000"))
 GRAPHRAG_CHUNK_OVERLAP: int = int(os.getenv("GRAPHRAG_CHUNK_OVERLAP", "200"))
-GRAPHRAG_MAX_WORKERS: int = int(os.getenv("GRAPHRAG_MAX_WORKERS", "10"))  # Parallel processing workers
+GRAPHRAG_MAX_WORKERS: int = int(os.getenv("GRAPHRAG_MAX_WORKERS", "5"))  # Parallel processing workers
 
 # Community Detection Settings
 COMMUNITY_MIN_SIZE: int = int(os.getenv("COMMUNITY_MIN_SIZE", "3"))

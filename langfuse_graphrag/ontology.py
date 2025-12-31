@@ -105,9 +105,37 @@ TRACE_SCHEMA = EntitySchema(
         "metadata": "string",  # JSON string
         "input": "string",  # Text content
         "output": "string",  # Text content
+        # CSV standard fields
+        "release": "string",
+        "version": "string",
+        "environment": "string",
+        "tags": "string",  # JSON string or comma-separated
+        "bookmarked": "boolean",
+        "public": "boolean",
+        "comments": "string",
+        # Game metrics (from game_summary output)
+        "total_rounds": "integer",
+        "final_resource": "float",
+        "tragedy_occurred": "boolean",
+        "avg_cooperation_index": "float",
+        "gini_coefficient": "float",
+        "payoff_fairness": "float",
+        # Round metrics (from round_X_metrics rows, extracted from CSV columns)
+        "round": "integer",
+        "cooperation_index": "float",
+        "resource_level": "float",
+        "total_extraction": "float",
+        # Metadata-extracted fields
+        "game_id": "string",
+        "player_id": "string",
+        "action_extraction": "integer",  # from metadata.attributes.action.extraction
+        "reasoning": "string",  # from metadata.attributes.reasoning
+        "llm_model": "string",  # from metadata.attributes.llm.model
+        "llm_temperature": "float",  # from metadata.attributes.llm.temperature
+        "end_time": "datetime",  # from metadata.attributes.end_time
     },
     required_properties=["id"],
-    indexes=["id", "session_id", "timestamp", "user_id"],
+    indexes=["id", "session_id", "timestamp", "user_id", "game_id", "player_id", "round"],
     unique_constraints=["id"],
 )
 
@@ -122,6 +150,9 @@ SPAN_SCHEMA = EntitySchema(
         "end_time": "datetime",
         "duration_ms": "float",
         "status": "string",  # "success" or "error"
+        "input": "string",  # Text content
+        "output": "string",  # Text content
+        "reasoning": "string",  # Text content (from metadata.attributes.reasoning)
         "metadata": "string",  # JSON string
     },
     required_properties=["id", "trace_id"],

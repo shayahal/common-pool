@@ -189,12 +189,22 @@ class GraphRAGIndexer:
         texts = []
         seen_texts = {}  # Map raw text -> text dict for deduplication
         
-        # Extract from Generation entities (prompts, responses, reasoning)
+        # Helper function to strip quotes from text
+        def strip_quotes(text: str) -> str:
+            """Strip surrounding quotes from text if present."""
+            if not text:
+                return text
+            text = text.strip()
+            if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+                return text[1:-1]
+            return text
+        
+        # Extract from Generation entities (prompts, responses, reasoning) - highest priority
         generations = entities.get("Generation", [])
         for gen in generations:
-            prompt = gen.get("prompt", "") or ""
-            response = gen.get("response", "") or ""
-            reasoning = gen.get("reasoning", "") or ""
+            prompt = strip_quotes(gen.get("prompt", "") or "")
+            response = strip_quotes(gen.get("response", "") or "")
+            reasoning = strip_quotes(gen.get("reasoning", "") or "")
             
             if prompt and prompt not in seen_texts:
                 text_dict = {
@@ -224,11 +234,55 @@ class GraphRAGIndexer:
                 texts.append(text_dict)
                 seen_texts[reasoning] = text_dict
         
-        # Extract from Trace entities (input, output)
+        # Extract from Span entities (input, output, reasoning) - medium priority
+        # Only if not already seen from Generation entities
+        spans = entities.get("Span", [])
+        for span in spans:
+            input_text = strip_quotes(span.get("input", "") or "")
+            output_text = strip_quotes(span.get("output", "") or "")
+            reasoning = strip_quotes(span.get("reasoning", "") or "")
+            
+            if input_text and input_text not in seen_texts:
+                text_dict = {
+                    "text": input_text,
+                    "type": "span_input",
+                    "prefix": "Span Input: ",
+                    "hash": hashlib.md5(input_text.encode()).hexdigest(),
+                }
+                texts.append(text_dict)
+                seen_texts[input_text] = text_dict
+            if output_text and output_text not in seen_texts:
+                text_dict = {
+                    "text": output_text,
+                    "type": "span_output",
+                    "prefix": "Span Output: ",
+                    "hash": hashlib.md5(output_text.encode()).hexdigest(),
+                }
+                texts.append(text_dict)
+                seen_texts[output_text] = text_dict
+            if reasoning and reasoning not in seen_texts:
+                text_dict = {
+                    "text": reasoning,
+                    "type": "span_reasoning",
+                    "prefix": "Span Reasoning: ",
+                    "hash": hashlib.md5(reasoning.encode()).hexdigest(),
+                }
+                texts.append(text_dict)
+                seen_texts[reasoning] = text_dict
+        
+        # Extract from Trace entities (input, output) - lowest priority
+        # Only for traces that don't have corresponding Spans (e.g., game_summary, round_metrics)
         traces = entities.get("Trace", [])
+        trace_ids_with_spans = {span.get("trace_id") for span in spans if span.get("trace_id")}
+        
         for trace in traces:
-            input_text = trace.get("input", "") or ""
-            output_text = trace.get("output", "") or ""
+            trace_id = trace.get("id")
+            # Skip traces that have spans (spans already processed above)
+            if trace_id in trace_ids_with_spans:
+                continue
+                
+            input_text = strip_quotes(trace.get("input", "") or "")
+            output_text = strip_quotes(trace.get("output", "") or "")
             
             if input_text and input_text not in seen_texts:
                 text_dict = {
@@ -421,6 +475,7 @@ For each entity, identify:
 
 Text: {text[:3000]}
 
+CRITICAL: Return ONLY valid JSON. No markdown, no code blocks, no explanations, no extra text.
 Return a JSON array of entities, each with "name", "type", and "description" fields.
 Example format:
 [
@@ -428,7 +483,9 @@ Example format:
   {{"name": "API call", "type": "action", "description": "Making requests to external APIs"}}
 ]
 
-If no entities are found, return an empty array []."""
+If no entities are found, return an empty array [].
+
+Return ONLY the JSON array, nothing else."""
 
         # Make API call with rate limit retry
         try:
@@ -440,7 +497,7 @@ If no entities are found, return an empty array []."""
                         {"role": "user", "content": prompt}
                     ],
                     temperature=self.config.get("graphrag_llm_temperature", 0.0),
-                    max_tokens=self.config.get("graphrag_llm_max_tokens", 4000),
+                    max_tokens=self.config.get("graphrag_llm_max_tokens", 4096),  # Max for gpt-3.5-turbo
                 ),
                 operation_name=f"Entity extraction for chunk {chunk.get('id', 'unknown')}"
             )
@@ -451,26 +508,52 @@ If no entities are found, return an empty array []."""
         if not response or not response.choices or len(response.choices) == 0:
             raise RuntimeError(f"Empty response from OpenAI API for chunk {chunk.get('id')}")
         
-        content = response.choices[0].message.content
-        if content:
-            content = content.strip()
-        else:
-            content = ""
+        choice = response.choices[0]
+        content = choice.message.content
+        finish_reason = choice.finish_reason
         
-        # Parse JSON response
+        # Check if response was truncated - this is a fatal error
+        if finish_reason == "length":
+            logger.error(
+                f"LLM response truncated for chunk {chunk.get('id')} (finish_reason=length). "
+                f"Current max_tokens: {self.config.get('graphrag_llm_max_tokens', 4096)}. "
+                f"Response content (first 1000 chars): {content[:1000] if content else 'None'}"
+            )
+            raise RuntimeError(
+                f"LLM response truncated for chunk {chunk.get('id')}. "
+                f"Increase graphrag_llm_max_tokens in config (current: {self.config.get('graphrag_llm_max_tokens', 4096)})"
+            )
+        
+        if not content:
+            logger.error(f"Empty content in response for chunk {chunk.get('id')}", exc_info=True)
+            raise RuntimeError(f"Empty content in response for chunk {chunk.get('id')}")
+        
+        content = content.strip()
+        
+        # Clean up markdown code blocks if present
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+        
+        # Try to extract JSON array from content (in case there's extra text)
+        # Look for the first [ and last ] to extract just the JSON array
+        first_bracket = content.find('[')
+        last_bracket = content.rfind(']')
+        if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+            content = content[first_bracket:last_bracket + 1]
+        
         try:
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
-            
             chunk_entities = json.loads(content)
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse entity extraction JSON for chunk {chunk.get('id')}: {e}", exc_info=True)
-            logger.error(f"Response content: {content[:500]}")
+            logger.error(f"Response content (first 2000 chars): {content[:2000]}")
+            logger.error(f"Response content (last 500 chars): {content[-500:]}")
+            logger.error(f"Response finish_reason: {finish_reason}")
+            logger.error(f"Response length: {len(content)}")
             raise RuntimeError(f"Failed to parse entity extraction JSON for chunk {chunk.get('id')}: {e}") from e
         
         # Cache the result
@@ -498,7 +581,7 @@ If no entities are found, return an empty array []."""
         cache = {}  # Cache for identical text chunks
         
         # Get max workers from config or use default
-        max_workers = self.config.get("graphrag_max_workers", 10)
+        max_workers = self.config.get("graphrag_max_workers", 5)
         
         # Process chunks in parallel batches
         for i in range(0, len(chunks), self.batch_size):
